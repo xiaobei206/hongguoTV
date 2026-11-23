@@ -53,7 +53,7 @@ object PhoneDiagnosticClient {
     private fun discover(context: Context): List<DiagnosticPhone> {
         val manager = context.getSystemService(Context.NSD_SERVICE) as NsdManager
         val phones = ConcurrentHashMap<String, DiagnosticPhone>()
-        val resolving = ConcurrentHashMap.newKeySet<String>()
+        val resolving = java.util.Collections.synchronizedSet(mutableSetOf<String>())
         val listener = object : NsdManager.DiscoveryListener {
             override fun onDiscoveryStarted(serviceType: String) {
                 Log.d(TAG, "diagnostic receiver discovery started")

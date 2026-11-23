@@ -45,6 +45,7 @@ import com.xiaobei206.hongguotv.model.Card
 import com.xiaobei206.hongguotv.model.Fav
 import com.xiaobei206.hongguotv.model.Feed
 import com.xiaobei206.hongguotv.model.PlayerState
+import com.xiaobei206.hongguotv.model.SdkDiagnostics
 import com.xiaobei206.hongguotv.model.SeriesPage
 import com.xiaobei206.hongguotv.model.TimeControl
 import com.xiaobei206.hongguotv.model.friendly
