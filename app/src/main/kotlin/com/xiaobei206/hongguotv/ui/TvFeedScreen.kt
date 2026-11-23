@@ -154,7 +154,11 @@ internal fun TvFeedScreen(
             }
         }
 
-        LaunchedEffect(state.screenKey, state.feedKey) {
+        LaunchedEffect(
+            state.screenKey,
+            state.feedKey,
+            if (state.filterRows.isEmpty()) state.cards.firstOrNull()?.id else null,
+        ) {
             if (state.filterRows.isNotEmpty()) {
                 runCatching { firstFilterFocus.requestFocus() }
             } else if (state.cards.isNotEmpty()) {
