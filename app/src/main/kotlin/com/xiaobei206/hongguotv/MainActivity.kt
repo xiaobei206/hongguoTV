@@ -504,7 +504,7 @@ class MainActivity : ComponentActivity() {
         composeFeedUi = null
         composeDetailUi = null
         val view = ComposeView(this).apply {
-            setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnViewTreeLifecycleDestroyed)
+            setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnDetachedFromWindowOrReleasedFromPool)
         }
         contentHost.addView(view, FrameLayout.LayoutParams(-1, -1))
         view.setContent {
@@ -927,7 +927,7 @@ class MainActivity : ComponentActivity() {
         composeFeedUi = null
         composeDetailUi = null
         val view = ComposeView(this).apply {
-            setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnViewTreeLifecycleDestroyed)
+            setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnDetachedFromWindowOrReleasedFromPool)
         }
         val identity = tvApp.handoffServer
         val report = if (settings) "" else deviceReport()
