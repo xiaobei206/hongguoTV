@@ -86,6 +86,7 @@ class MainActivity : ComponentActivity() {
     private var currentSeries: SeriesPage? = null
     private var headerTitle = "推荐"
     private var renderedScreen: Screen? = null
+    private var renderedFilterKey = ""
 
     private lateinit var shell: LinearLayout
     private lateinit var rail: LinearLayout
@@ -121,6 +122,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private data class FilterChoice(
+        val key: String,
         val label: String,
         val selected: Boolean,
         val onClick: () -> Unit,
@@ -290,6 +292,7 @@ class MainActivity : ComponentActivity() {
         subHeader = text("方向键移动 · 确认打开 · 长按收藏", 16f, 0xffa7b2c2.toInt())
         column.addView(subHeader, LinearLayout.LayoutParams(-1, dp(30)))
         feedFilterHost = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; visibility = View.GONE }
+        renderedFilterKey = ""
         column.addView(feedFilterHost, LinearLayout.LayoutParams(-1, ViewGroup.LayoutParams.WRAP_CONTENT))
         recycler = RecyclerView(this).apply {
             id = View.generateViewId()
@@ -404,13 +407,28 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun renderFeedFilters(snapshot: UiSnapshot) {
-        feedFilterHost.removeAllViews()
         val m = model ?: run { feedFilterHost.visibility = View.GONE; return }
+        val today = todayKey()
+        val filterKey = when (screen) {
+            Screen.RANK -> buildString {
+                append("rank|").append(snapshot.currentRankContent).append('|').append(snapshot.rankBoard).append('|')
+                snapshot.rankContents.forEach { append(it.id).append(':').append(it.name).append('|') }
+                append("boards|")
+                snapshot.rankBoards.forEach { append(it.id).append(':').append(it.name).append(':').append(it.selected).append('|') }
+            }
+            Screen.NEW -> "new|$today|${snapshot.newDate}|${snapshot.newDates.joinToString("|")}"
+            else -> screen.name
+        }
+        if (filterKey == renderedFilterKey) return
+        val focusedFilterKey = currentFocus?.takeIf { it.tag is String }?.tag as? String
+        renderedFilterKey = filterKey
+        feedFilterHost.removeAllViews()
         when (screen) {
             Screen.RANK -> {
                 if (snapshot.rankContents.isNotEmpty()) {
                     addFilterRow(feedFilterHost, snapshot.rankContents.map { content ->
                         FilterChoice(
+                            key = "rank-content:${content.id}",
                             label = content.name.ifBlank { content.id },
                             selected = snapshot.currentRankContent == content.id,
                             onClick = {
@@ -424,14 +442,20 @@ class MainActivity : ComponentActivity() {
                     })
                     if (snapshot.rankBoards.isNotEmpty()) {
                         val choices = ArrayList<FilterChoice>()
-                        choices += FilterChoice("默认", snapshot.rankBoard.isEmpty()) {
-                            if (m.rankBoard.isNotEmpty()) {
-                                m.rankBoard = ""
-                                enterFeed(Screen.RANK)
-                            }
-                        }
+                        choices += FilterChoice(
+                            key = "rank-board:default",
+                            label = "默认",
+                            selected = snapshot.rankBoard.isEmpty() && snapshot.rankBoards.none { it.selected },
+                            onClick = {
+                                if (m.rankBoard.isNotEmpty()) {
+                                    m.rankBoard = ""
+                                    enterFeed(Screen.RANK)
+                                }
+                            },
+                        )
                         snapshot.rankBoards.forEach { board ->
                             choices += FilterChoice(
+                                key = "rank-board:${board.id}",
                                 label = board.name.ifBlank { board.id },
                                 selected = board.id == snapshot.rankBoard ||
                                     (snapshot.rankBoard.isEmpty() && board.selected),
@@ -448,10 +472,10 @@ class MainActivity : ComponentActivity() {
                 }
             }
             Screen.NEW -> {
-                val today = todayKey()
                 val dates = (listOf(today) + snapshot.newDates).distinct()
                 addFilterRow(feedFilterHost, dates.map { date ->
                     FilterChoice(
+                        key = "new-date:$date",
                         label = dayLabel(date, today),
                         selected = m.dayIsOn(date),
                         onClick = {
@@ -466,6 +490,9 @@ class MainActivity : ComponentActivity() {
             else -> Unit
         }
         feedFilterHost.visibility = if (feedFilterHost.childCount > 0) View.VISIBLE else View.GONE
+        if (focusedFilterKey != null) {
+            feedFilterHost.post { feedFilterHost.findViewWithTag<View>(focusedFilterKey)?.requestFocus() }
+        }
     }
 
     private fun addFilterRow(parent: LinearLayout, choices: List<FilterChoice>) {
@@ -481,6 +508,7 @@ class MainActivity : ComponentActivity() {
         }
         val buttons = choices.map { choice ->
             navButton(choice.label) { choice.onClick() }.apply {
+                tag = choice.key
                 isSelected = choice.selected
                 textSize = 16f
                 minWidth = dp(88)
@@ -805,6 +833,8 @@ class MainActivity : ComponentActivity() {
         playerFocusButtons = focusButtons
         playerView.nextFocusUpId = playButton.id
         playerView.nextFocusDownId = playerSeek.id
+        playerView.nextFocusLeftId = playButton.id
+        playerView.nextFocusRightId = playButton.id
         playerSeek.nextFocusUpId = playerView.id
         playerSeek.nextFocusDownId = playButton.id
         playButton.nextFocusUpId = playerSeek.id
