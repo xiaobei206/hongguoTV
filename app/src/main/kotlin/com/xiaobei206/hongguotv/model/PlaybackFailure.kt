@@ -101,7 +101,7 @@ data class PlaybackFailure(
         get() = sdkCode == ErrorCode.ANONYMOUS_LIMITED.name || sdkCode == ErrorCode.DEVICE_REJECTED.name
 
     fun toReport(): String = buildString {
-        appendLine("开心果 Android 播放故障诊断")
+        appendLine("hongguoTV Android TV 播放故障诊断")
         appendLine("时间：" + occurredAt)
         appendLine("Episode ID：" + episodeId)
         appendLine("SDK 错误代码：" + sdkCode)

@@ -48,6 +48,7 @@ import com.xiaobei206.hongguotv.model.PlayerState
 import com.xiaobei206.hongguotv.model.SeriesPage
 import com.xiaobei206.hongguotv.model.TimeControl
 import com.xiaobei206.hongguotv.model.friendly
+import com.xiaobei206.hongguotv.playback.PlaybackDiagnostics
 import com.xiaobei206.hongguotv.model.metaLine
 import dev.openhongguo.Episode
 import kotlinx.coroutines.flow.distinctUntilChanged
@@ -87,6 +88,7 @@ class MainActivity : ComponentActivity() {
     private lateinit var speedButton: TextView
     private lateinit var qualityButton: TextView
     private lateinit var retryButton: TextView
+    private lateinit var diagnosticButton: TextView
     private lateinit var progressText: TextView
     private var episodeDialog: AlertDialog? = null
 
@@ -528,6 +530,9 @@ class MainActivity : ComponentActivity() {
         retryButton = navButton("重试播放") { model?.player?.retry() }
         retryButton.visibility = View.GONE
         playerControls.addView(retryButton, LinearLayout.LayoutParams(dp(140), dp(42)).apply { topMargin = dp(6) })
+        diagnosticButton = navButton("发送诊断到手机") { sendPlaybackDiagnosticsToPhones() }
+        diagnosticButton.visibility = View.GONE
+        playerControls.addView(diagnosticButton, LinearLayout.LayoutParams(dp(190), dp(42)).apply { topMargin = dp(6) })
         playerLayer.addView(playerControls, FrameLayout.LayoutParams(-1, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM))
     }
 
@@ -575,7 +580,13 @@ class MainActivity : ComponentActivity() {
             PlayerState.Playing -> "播放中"
             is PlayerState.Failed -> state.message
         }
-        retryButton.visibility = if (player.state is PlayerState.Failed) View.VISIBLE else View.GONE
+        val failed = player.state as? PlayerState.Failed
+        retryButton.visibility = if (failed != null) View.VISIBLE else View.GONE
+        diagnosticButton.visibility = if (failed?.diagnostic != null) View.VISIBLE else View.GONE
+        if (failed != null) {
+            playerControls.visibility = View.VISIBLE
+            handler.removeCallbacks(hideControls)
+        }
         playButton.text = if (player.video.wantsToPlay && player.video.status != TimeControl.PAUSED) "暂停" else "播放"
         speedButton.text = "倍速 ${"%.2f".format(player.speed)}×"
         qualityButton.text = if (player.quality > 0) "${player.quality}P" else "画质"
@@ -593,6 +604,60 @@ class MainActivity : ComponentActivity() {
             progressText.text = "正在读取时长…"
         }
         renderPlayerState()
+    }
+
+    private fun sendPlaybackDiagnosticsToPhones() {
+        val report = buildPlaybackDiagnosticReport()
+        diagnosticButton.isEnabled = false
+        diagnosticButton.text = "正在搜索手机…"
+        lifecycleScope.launch {
+            try {
+                val result = PhoneDiagnosticClient.sendToAll(this@MainActivity, report)
+                val message = when {
+                    result.found == 0 -> "没有发现开启“接收诊断”的开心果手机，请确认同一局域网并保持手机 App 在前台"
+                    result.delivered > 0 -> "完整诊断已发送到 ${result.delivered} 台手机"
+                    else -> "发现 ${result.found} 台手机，但没有成功送达；请检查接收开关或网络隔离"
+                }
+                toast(message)
+            } catch (e: Exception) {
+                toast("发送诊断失败：${e.message ?: e.javaClass.simpleName}")
+            } finally {
+                diagnosticButton.isEnabled = true
+                diagnosticButton.text = "发送诊断到手机"
+            }
+        }
+    }
+
+    private fun buildPlaybackDiagnosticReport(): String {
+        val failure = (model?.player?.state as? PlayerState.Failed)?.diagnostic
+        val stats = PlaybackDiagnostics.snapshot()
+        return buildString {
+            appendLine("hongguoTV Android TV 播放故障诊断")
+            appendLine("应用版本：${BuildConfig.VERSION_NAME}（versionCode ${BuildConfig.VERSION_CODE}）")
+            appendLine("采集时间：${java.time.Instant.now()}")
+            appendLine()
+            appendLine("设备与解码器环境：")
+            appendLine(deviceReport())
+            appendLine()
+            if (failure != null) {
+                appendLine(failure.toReport())
+            } else {
+                appendLine("播放失败对象没有提供 SDK 异常诊断；附带最近 SDK 请求记录：")
+                SdkDiagnostics.snapshot().forEach { appendLine("${it.time}  ${it.message}") }
+            }
+            appendLine()
+            appendLine("播放器运行状态：")
+            appendLine("视频编码：${stats.videoCodec}")
+            appendLine("音频编码：${stats.audioCodec}")
+            appendLine("解码器：${stats.decoderName}")
+            appendLine("硬件解码：${stats.decoderHardware}")
+            appendLine("分辨率：${stats.width}×${stats.height}")
+            appendLine("帧率：${stats.frameRate}")
+            appendLine("码率：${stats.bitrate}")
+            appendLine("丢帧数：${stats.droppedFrames}")
+            appendLine("最近 20 秒网络字节：${stats.networkBytesLast20Seconds}")
+            appendLine("隐私：不包含 Cookie、Token、签名值或匿名设备原始标识。")
+        }
     }
 
     private fun openEpisodeDialog() {

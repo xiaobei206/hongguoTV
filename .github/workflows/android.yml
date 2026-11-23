@@ -22,6 +22,26 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Checkout openhongguo SDK source
+        uses: actions/checkout@v4
+        with:
+          repository: xiaobei206/openhongguo
+          ref: main
+          path: .build/openhongguo
+
+      - name: Checkout audited Android diagnostics patch
+        uses: actions/checkout@v4
+        with:
+          repository: xiaobei206/kaixinguo-android
+          ref: main
+          path: .build/kaixinguo
+
+      - name: Set up Go 1.26
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.x'
+          cache: false
+
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
@@ -34,7 +54,24 @@ jobs:
 
       - name: Install Android 16 SDK
         run: |
-          sdkmanager "platforms;android-36" "build-tools;36.0.0"
+          sdkmanager "platforms;android-36" "build-tools;36.0.0" "ndk;27.2.12479018"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/27.2.12479018" >> "$GITHUB_ENV"
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      - name: Patch, test and build the shared openhongguo Android AAR
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 .build/kaixinguo/scripts/patch-openhongguo.py .build/openhongguo
+          cd .build/openhongguo
+          go test ./...
+          (cd bindings/mobile/core && go test ./...)
+          go install golang.org/x/mobile/cmd/gomobile@v0.0.0-20261011034528-197770444867
+          gomobile init
+          cd bindings/mobile
+          chmod +x build.sh
+          ./build.sh android
+          test -s android/build/outputs/aar/openhongguo-release.aar
 
       - name: Verify or repair fixed signing materials
         shell: bash
@@ -92,7 +129,8 @@ jobs:
         run: |
           set -euo pipefail
           chmod +x gradlew
-          ./gradlew --no-daemon testDebugUnitTest lintRelease assembleRelease
+          ./gradlew --no-daemon testDebugUnitTest lintRelease assembleRelease \
+            -PpatchedOpenhongguoAar="$GITHUB_WORKSPACE/.build/openhongguo/bindings/mobile/android/build/outputs/aar/openhongguo-release.aar"
 
       - name: Print Android Lint diagnostics when present
         if: always()

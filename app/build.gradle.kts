@@ -1,5 +1,7 @@
 import java.util.Properties
 
+val patchedOpenhongguoAar = providers.gradleProperty("patchedOpenhongguoAar").orNull
+
 plugins {
     id("com.android.application")
     kotlin("android")
@@ -85,7 +87,11 @@ dependencies {
     implementation("androidx.media3:media3-exoplayer:1.8.1")
     implementation("androidx.media3:media3-ui:1.8.1")
     implementation("androidx.media3:media3-session:1.8.1")
-    implementation("io.github.beilunyang:openhongguo:0.4.0")
+    if (patchedOpenhongguoAar != null) {
+        implementation(files(patchedOpenhongguoAar))
+    } else {
+        implementation("io.github.beilunyang:openhongguo:0.4.0")
+    }
 
     coreLibraryDesugaring("com.android.tools:desugar_jdk_libs_nio:2.1.5")
 
