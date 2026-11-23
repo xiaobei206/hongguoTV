@@ -652,6 +652,40 @@ class MainActivity : ComponentActivity() {
         diagnosticButton.visibility = View.GONE
         playerControls.addView(diagnosticButton, LinearLayout.LayoutParams(dp(190), dp(42)).apply { topMargin = dp(6) })
         playerLayer.addView(playerControls, FrameLayout.LayoutParams(-1, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM))
+        bindPlayerMediaKeys(playerControls)
+    }
+
+    /**
+     * Media transport keys should work when a player control owns focus too.
+     * Keep this local to the player instead of overriding the restricted
+     * ComponentActivity.dispatchKeyEvent API.
+     */
+    private fun bindPlayerMediaKeys(view: View) {
+        if (view.isFocusable || view.isClickable) {
+            view.setOnKeyListener { _, keyCode, event ->
+                if (event.action != KeyEvent.ACTION_DOWN) return@setOnKeyListener false
+                when (keyCode) {
+                    KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE -> {
+                        togglePlayerPause(focusControls = true)
+                        true
+                    }
+                    KeyEvent.KEYCODE_MEDIA_PLAY -> {
+                        model?.player?.video?.play()
+                        revealPlayerControls()
+                        true
+                    }
+                    KeyEvent.KEYCODE_MEDIA_PAUSE -> {
+                        model?.player?.video?.pause()
+                        revealPlayerControls()
+                        true
+                    }
+                    else -> false
+                }
+            }
+        }
+        if (view is ViewGroup) {
+            for (index in 0 until view.childCount) bindPlayerMediaKeys(view.getChildAt(index))
+        }
     }
 
     private fun revealPlayerControls(focusControls: Boolean = false) {
@@ -830,19 +864,6 @@ class MainActivity : ComponentActivity() {
         val index = player.qualities.indexOf(player.quality).coerceAtLeast(-1)
         player.chooseQuality(player.qualities[(index + 1) % player.qualities.size])
         renderPlayerState()
-    }
-
-    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
-        if (event.action == KeyEvent.ACTION_DOWN && screen == Screen.PLAYER &&
-            episodeDialog?.isShowing != true) {
-            when (event.keyCode) {
-                KeyEvent.KEYCODE_BACK -> { leavePlayer(); return true }
-                KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE -> { togglePlayerPause(focusControls = true); return true }
-                KeyEvent.KEYCODE_MEDIA_PLAY -> { model?.player?.video?.play(); revealPlayerControls(); return true }
-                KeyEvent.KEYCODE_MEDIA_PAUSE -> { model?.player?.video?.pause(); revealPlayerControls(); return true }
-            }
-        }
-        return super.dispatchKeyEvent(event)
     }
 
     private fun leavePlayer() {
