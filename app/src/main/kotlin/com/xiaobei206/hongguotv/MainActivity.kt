@@ -242,8 +242,6 @@ class MainActivity : ComponentActivity() {
 
     private fun enterFeed(target: Screen) {
         val m = model ?: return
-        feedScrollLoadJob?.cancel()
-        feedScrollLoadJob = null
         parentScreen = target
         currentSeries = null
         currentFeed = when (target) {
@@ -462,7 +460,6 @@ class MainActivity : ComponentActivity() {
     private fun doSearch(query: String) {
         val m = model ?: return
         if (screen != Screen.SEARCH) searchReturnScreen = screen
-        feedScrollLoadJob?.cancel()
         currentFeed = m.searchFeed(query)
         headerTitle = "搜索：$query"
         screen = Screen.SEARCH
@@ -471,11 +468,8 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun onCardSelected(card: Card) {
-        feedScrollLoadJob?.cancel()
         if (screen == Screen.HISTORY) {
             val m = model ?: return
-            feedPrefillJob?.cancel()
-            feedPrefillJob = null
             parentScreen = Screen.HISTORY
             m.playSeason(card.id)
             screen = Screen.PLAYER
@@ -487,10 +481,6 @@ class MainActivity : ComponentActivity() {
 
     private fun openDetail(card: Card) {
         val m = model ?: return
-        feedPrefillJob?.cancel()
-        feedPrefillJob = null
-        feedScrollLoadJob?.cancel()
-        feedScrollLoadJob = null
         parentScreen = screen
         currentSeries = m.seriesPage(card.id, restartIfLoading = true)
         screen = Screen.DETAIL
@@ -1236,7 +1226,6 @@ class MainActivity : ComponentActivity() {
                 screen = searchReturnScreen
                 currentFeed = feedFor(searchReturnScreen)
                 showShell()
-                currentFeed?.let { feed -> scheduleInitialFeedPrefill(screen, feed) }
             }
             Screen.HOME -> super.onBackPressed()
             else -> enterFeed(Screen.HOME)
