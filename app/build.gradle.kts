@@ -1,11 +1,11 @@
 import java.util.Properties
 
-val patchedOpenhongguoAar = providers.gradleProperty("patchedOpenhongguoAar").orNull
-
 plugins {
     id("com.android.application")
     kotlin("android")
 }
+
+val patchedOpenhongguoAar = providers.gradleProperty("patchedOpenhongguoAar").orNull
 
 val signingFile = rootProject.file("hongguoTV-release.jks")
 val signingSecrets = Properties().apply {
