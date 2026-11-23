@@ -407,7 +407,7 @@ class MainActivity : ComponentActivity() {
         feedPrefillJob?.cancel()
         feedPrefillJob = null
         parentScreen = screen
-        currentSeries = m.seriesPage(card.id)
+        currentSeries = m.seriesPage(card.id, restartIfLoading = true)
         screen = Screen.DETAIL
         showShell()
     }

@@ -16,6 +16,7 @@ import dev.openhongguo.Series
 import dev.openhongguo.SeriesSummary
 import dev.openhongguo.ShortRankQuery
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
@@ -350,31 +351,44 @@ class AppModel(
     // MARK: - Series
 
     /** The series' page, loading it unless it is here or on its way. */
-    fun seriesPage(id: String): SeriesPage {
+    fun seriesPage(id: String, restartIfLoading: Boolean = false): SeriesPage {
         val sp = seriesEntry(id)
-        // A prior failed/timed-out request must not poison future opens from history/favorites.
-        if (sp.series == null && !sp.loading) loadSeries(sp)
+        // Re-entering a detail page that still has an old in-flight request must
+        // replace it. Otherwise the stale loading flag hides the fact that it is stuck.
+        when {
+            sp.series == null && sp.loading && restartIfLoading -> loadSeries(sp, force = true)
+            sp.series == null && !sp.loading -> loadSeries(sp)
+        }
         return sp
     }
 
     /** The series' page, without loading it. */
     fun seriesEntry(id: String): SeriesPage = series.getOrPut(id) { SeriesPage(id) }
 
-    fun loadSeries(sp: SeriesPage) {
-        if (sp.loading) return
+    fun loadSeries(sp: SeriesPage, force: Boolean = false) {
+        if (sp.loading && !force) return
+        if (force) {
+            // Invalidate the old coroutine before cancelling it, so its finally
+            // block cannot clear the new request's loading state or overwrite errors.
+            sp.requestGeneration += 1
+            sp.requestJob?.cancel()
+            sp.requestJob = null
+            sp.loading = false
+        }
         sp.loading = true
         sp.error = null
         val id = sp.id
-        scope.launch {
+        val generation = ++sp.requestGeneration
+        val job = scope.launch(start = CoroutineStart.LAZY) {
             try {
-                // A catalog request that never returns used to leave the detail page
-                // permanently loading. Bound both parallel calls and always release
-                // the state so the viewer can retry without leaving the page.
+                // Bound both catalog calls. Reopening from history also cancels and
+                // replaces an in-flight request instead of waiting for this timeout.
                 val (seriesResult, episodesResult) = withTimeout(20_000L) {
                     val s = async { attempt { catalog.getSeries(id) } }
                     val e = async { attempt { catalog.listEpisodes(id, EpisodeOptions()).items } }
                     s.await() to e.await()
                 }
+                if (sp.requestGeneration != generation) return@launch
                 val seriesError = seriesResult.exceptionOrNull()
                 val episodesError = episodesResult.exceptionOrNull()
                 when {
@@ -389,18 +403,29 @@ class AppModel(
                     }
                 }
             } catch (e: TimeoutCancellationException) {
-                sp.error = AppError("读取剧集信息超时，请选择“重新加载”重试")
-                debugLog { "series detail timeout id=$id" }
+                if (sp.requestGeneration == generation) {
+                    sp.error = AppError("读取剧集信息超时，请选择“重新加载”重试")
+                    debugLog { "series detail timeout id=$id" }
+                }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                sp.error = e
-                debugLog { "series detail failed id=$id error=$e" }
+                if (sp.requestGeneration == generation) {
+                    sp.error = e
+                    debugLog { "series detail failed id=$id error=$e" }
+                }
             } finally {
-                sp.loading = false
+                if (sp.requestGeneration == generation) {
+                    sp.loading = false
+                    sp.requestJob = null
+                }
             }
-            player.fillPending(sp) // starts the episode, or says why it can't
+            if (sp.requestGeneration == generation) {
+                player.fillPending(sp) // starts the episode, or says why it can't
+            }
         }
+        sp.requestJob = job
+        job.start()
     }
 
     /** Lists the seasons of a series in several, and gives the list to the page of each. */

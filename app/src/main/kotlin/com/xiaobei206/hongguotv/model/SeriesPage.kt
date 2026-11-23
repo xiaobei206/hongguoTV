@@ -5,6 +5,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import dev.openhongguo.Episode
+import kotlinx.coroutines.Job
 import dev.openhongguo.PlatformType
 import dev.openhongguo.Season
 import dev.openhongguo.Series
@@ -23,6 +24,10 @@ class SeriesPage internal constructor(val id: String) {
         internal set
     var error by mutableStateOf<Throwable?>(null)
         internal set
+
+    /** Active detail request, so reopening a stuck page can cancel and replace it. */
+    internal var requestJob: Job? = null
+    internal var requestGeneration: Long = 0L
 
     /** Which hundred of episodes shows. */
     var part by mutableIntStateOf(0)
