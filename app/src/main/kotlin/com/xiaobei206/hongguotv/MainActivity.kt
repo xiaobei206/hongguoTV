@@ -244,7 +244,7 @@ class MainActivity : ComponentActivity() {
             layoutManager = GridLayoutManager(this@MainActivity, gridColumns())
             adapter = cardAdapter
             setHasFixedSize(true)
-            itemViewCacheSize = 3
+            setItemViewCacheSize(3)
             overScrollMode = View.OVER_SCROLL_NEVER
             setPadding(dp(2), dp(4), dp(2), dp(10))
             clipToPadding = false
@@ -409,11 +409,14 @@ class MainActivity : ComponentActivity() {
                 if (resume != null) startPlayer(resume.seriesID, resume.number, resume.start)
                 else startPlayer(page.id, 1, 0.0)
             }, LinearLayout.LayoutParams(dp(210), dp(48)))
-            actions.addView(navButton("☆ 收藏") {
+            val favoriteButton = navButton("☆ 收藏") {}
+            favoriteButton.setOnClickListener {
                 val added = model?.favorites?.toggle(Fav.of(Card.of(series))) == true
                 toast(if (added) "已收藏" else "已取消收藏")
-                (it as? TextView)?.text = if (added) "★ 已收藏" else "☆ 收藏"
-            }, LinearLayout.LayoutParams(dp(140), dp(48)).apply { leftMargin = dp(12) })
+                favoriteButton.text = if (added) "★ 已收藏" else "☆ 收藏"
+            }
+            actions.addView(favoriteButton,
+                LinearLayout.LayoutParams(dp(140), dp(48)).apply { leftMargin = dp(12) })
         } else if (actions.childCount == 0 && snapshot.detailError.isNotBlank()) {
             actions.addView(navButton("重新加载") { model?.loadSeries(page) })
         }

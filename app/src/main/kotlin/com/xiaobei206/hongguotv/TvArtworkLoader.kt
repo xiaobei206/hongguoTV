@@ -76,28 +76,35 @@ class TvArtworkLoader(context: Context) {
     }
 
     @Suppress("NewApi")
-    private fun decode(bytes: ByteArray): Bitmap? = try {
-        if (Build.VERSION.SDK_INT >= 28) {
-            ImageDecoder.decodeBitmap(ImageDecoder.createSource(ByteBuffer.wrap(bytes))) { decoder, info, _ ->
-                val scale = minOf(1.0, 420.0 / max(info.size.width, info.size.height))
-                decoder.setTargetSize(
-                    (info.size.width * scale).roundToInt().coerceAtLeast(1),
-                    (info.size.height * scale).roundToInt().coerceAtLeast(1),
+    private fun decode(bytes: ByteArray): Bitmap? {
+        return try {
+            if (Build.VERSION.SDK_INT >= 28) {
+                ImageDecoder.decodeBitmap(ImageDecoder.createSource(ByteBuffer.wrap(bytes))) { decoder, info, _ ->
+                    val scale = minOf(1.0, 420.0 / max(info.size.width, info.size.height))
+                    decoder.setTargetSize(
+                        (info.size.width * scale).roundToInt().coerceAtLeast(1),
+                        (info.size.height * scale).roundToInt().coerceAtLeast(1),
+                    )
+                    decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
+                }
+            } else {
+                val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+                if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
+                var sample = 1
+                while (max(bounds.outWidth, bounds.outHeight) / sample > 420) sample *= 2
+                BitmapFactory.decodeByteArray(
+                    bytes, 0, bytes.size,
+                    BitmapFactory.Options().apply {
+                        inSampleSize = sample
+                        inPreferredConfig = Bitmap.Config.RGB_565
+                    },
                 )
-                decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
             }
-        } else {
-            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-            BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
-            if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
-            var sample = 1
-            while (max(bounds.outWidth, bounds.outHeight) / sample > 420) sample *= 2
-            BitmapFactory.decodeByteArray(
-                bytes, 0, bytes.size,
-                BitmapFactory.Options().apply { inSampleSize = sample; inPreferredConfig = Bitmap.Config.RGB_565 },
-            )
+        } catch (_: Exception) {
+            null
         }
-    } catch (_: Exception) { null }
+    }
 
     private fun download(raw: String): ByteArray? {
         val connection = runCatching { URL(raw).openConnection() as HttpURLConnection }.getOrNull() ?: return null
