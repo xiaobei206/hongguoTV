@@ -935,6 +935,7 @@ class MainActivity : ComponentActivity() {
             add("版本" to BuildConfig.VERSION_NAME)
             add("最低系统" to "Android 6.0 / API 23")
             add("播放器" to "Media3 ExoPlayer")
+            add("自动检查" to "每 12 小时一次；安装前由系统确认")
             add("签名" to "hongguoTV 独立签名")
             if (identity != null) {
                 add("接力名称" to identity.displayName)
