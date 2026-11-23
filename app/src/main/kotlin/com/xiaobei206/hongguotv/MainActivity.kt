@@ -33,7 +33,6 @@ import android.widget.TextView
 import androidx.activity.ComponentActivity
 import androidx.compose.ui.platform.ComposeView
 import androidx.compose.ui.platform.ViewCompositionStrategy
-import androidx.compose.ui.platform.setContent
 import com.xiaobei206.hongguotv.ui.TvFeedFilterChoice
 import com.xiaobei206.hongguotv.ui.TvFeedFilterRow
 import com.xiaobei206.hongguotv.ui.TvFeedScreen
