@@ -522,7 +522,7 @@ class MainActivity : ComponentActivity() {
             button.nextFocusLeftId = buttons.getOrNull(index - 1)?.id ?: button.id
             button.nextFocusRightId = buttons.getOrNull(index + 1)?.id ?: button.id
         }
-        scroll.addView(row, HorizontalScrollView.LayoutParams(
+        scroll.addView(row, FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.MATCH_PARENT,
         ))
         parent.addView(scroll, LinearLayout.LayoutParams(-1, dp(48)))
