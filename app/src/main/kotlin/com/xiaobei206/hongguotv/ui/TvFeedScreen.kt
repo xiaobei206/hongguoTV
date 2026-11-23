@@ -1,6 +1,7 @@
 package com.xiaobei206.hongguotv.ui
 
 import android.widget.ImageView
+import android.view.KeyEvent as AndroidKeyEvent
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -34,9 +35,10 @@ import androidx.compose.foundation.clickable
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.platform.AndroidView
+import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
@@ -48,6 +50,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
@@ -58,9 +61,7 @@ import androidx.compose.ui.Alignment
 import com.xiaobei206.hongguotv.TvArtworkLoader
 import com.xiaobei206.hongguotv.model.Card
 import com.xiaobei206.hongguotv.model.Feed
-import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.math.max
 
@@ -113,47 +114,79 @@ internal fun TvFeedScreen(
             .background(TvColors.background)
             .padding(start = 22.dp, end = 24.dp, top = 14.dp, bottom = 14.dp),
     ) {
-        val columns = (maxWidth / 166.dp).toInt().coerceIn(3, 7)
-        val initialTarget = max(30, columns * 4)
+        val columns = (maxWidth / 190.dp).toInt().coerceIn(3, 7)
+        val estimatedVisibleRows = (maxHeight / 295.dp).toInt().coerceAtLeast(2)
+        val initialTarget = (columns * estimatedVisibleRows * 2).coerceIn(20, 40)
 
-        LaunchedEffect(feed, state.feedKey, columns) {
+        var paginationEpoch by remember(feed, state.feedKey) { mutableIntStateOf(0) }
+        var sparseBatchesPaused by remember(feed, state.feedKey) { mutableStateOf(false) }
+
+        // One coroutine coordinates first-screen fill and scrolling. This avoids
+        // competing prefetch loops and caps consecutive empty batches while still
+        // walking cursor-advancing pages far enough to find sparse valid results.
+        LaunchedEffect(feed, state.feedKey, gridState, columns, paginationEpoch, state.error) {
             val source = feed ?: return@LaunchedEffect
             var rounds = 0
-            while (rounds < 3 && source.wantsMore) {
+            var emptyBatches = 0
+            while (rounds < 8 && source.cards.size < initialTarget && source.wantsMore) {
                 if (source.loading) {
                     val completed = withTimeoutOrNull(30_000L) {
                         snapshotFlow { source.loading }.first { !it }
                     } != null
-                    if (!completed) break
+                    if (!completed) {
+                        sparseBatchesPaused = true
+                        break
+                    }
                 }
-                if (source.cards.size >= initialTarget || !source.wantsMore) break
+                if (source.error != null || source.cards.size >= initialTarget || !source.wantsMore) break
                 val before = source.cards.size
                 source.loadMore(minAdditionalCards = (initialTarget - before).coerceAtLeast(1))
                 val completed = withTimeoutOrNull(30_000L) {
                     snapshotFlow { source.loading }.first { !it }
                 } != null
+                if (!completed || source.error != null) break
                 rounds++
-                if (!completed || source.error != null || source.cards.size <= before) break
+                if (source.cards.size <= before) {
+                    emptyBatches++
+                    if (emptyBatches >= 4) {
+                        sparseBatchesPaused = true
+                        break
+                    }
+                } else {
+                    emptyBatches = 0
+                    sparseBatchesPaused = false
+                }
             }
-        }
+            if (sparseBatchesPaused) return@LaunchedEffect
 
-        LaunchedEffect(feed, state.feedKey, gridState, columns) {
-            val source = feed ?: return@LaunchedEffect
-            snapshotFlow {
-                val info = gridState.layoutInfo
-                Triple(
-                    info.totalItemsCount,
-                    info.visibleItemsInfo.lastOrNull()?.index ?: -1,
-                    source.loading,
-                )
-            }.distinctUntilChanged().collect { (count, lastVisible, loading) ->
+            while (source.wantsMore) {
                 val threshold = (columns * 3).coerceAtLeast(9)
-                if (!loading && source.wantsMore && count > 0 && lastVisible >= count - threshold) {
-                    source.loadMore()
+                snapshotFlow {
+                    val info = gridState.layoutInfo
+                    val count = info.totalItemsCount
+                    val lastVisible = info.visibleItemsInfo.lastOrNull()?.index ?: -1
+                    !source.loading && source.wantsMore &&
+                        (source.cards.isEmpty() || (count > 0 && lastVisible >= count - threshold))
+                }.first { it }
+                if (source.error != null) break
+                val before = source.cards.size
+                source.loadMore()
+                val completed = withTimeoutOrNull(30_000L) {
+                    snapshotFlow { source.loading }.first { !it }
+                } != null
+                if (!completed || source.error != null) break
+                if (source.cards.size <= before) {
+                    emptyBatches++
+                    if (emptyBatches >= 4) {
+                        sparseBatchesPaused = true
+                        break
+                    }
+                } else {
+                    emptyBatches = 0
+                    sparseBatchesPaused = false
                 }
             }
         }
-
         LaunchedEffect(state.screenKey, state.feedKey) {
             runCatching { gridState.scrollToItem(0) }
         }
@@ -202,7 +235,11 @@ internal fun TvFeedScreen(
                     )
                 }
                 TvActionButton(label = "搜剧", onClick = onSearch, width = 88.dp)
-                TvActionButton(label = "刷新", onClick = onRefresh, width = 88.dp)
+                TvActionButton(label = "刷新", onClick = {
+                    sparseBatchesPaused = false
+                    paginationEpoch++
+                    onRefresh()
+                }, width = 88.dp)
             }
 
             if (state.filterRows.isNotEmpty()) {
@@ -221,7 +258,7 @@ internal fun TvFeedScreen(
 
             if (state.cards.isEmpty()) {
                 Box(
-                    modifier = Modifier.fillMaxSize(),
+                    modifier = Modifier.fillMaxWidth().weight(1f),
                     contentAlignment = Alignment.Center,
                 ) {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -253,7 +290,18 @@ internal fun TvFeedScreen(
                         )
                         if (!state.loading && state.error.isNotBlank()) {
                             Spacer(Modifier.height(12.dp))
-                            TvActionButton(label = "重试加载", onClick = onRefresh, width = 140.dp)
+                            TvActionButton(label = "重试加载", onClick = {
+                                sparseBatchesPaused = false
+                                paginationEpoch++
+                                onRefresh()
+                            }, width = 140.dp)
+                        } else if (!state.loading && sparseBatchesPaused && feed?.wantsMore == true) {
+                            Spacer(Modifier.height(12.dp))
+                            TvActionButton(label = "继续查找", onClick = {
+                                sparseBatchesPaused = false
+                                paginationEpoch++
+                                feed.loadMore(minAdditionalCards = initialTarget)
+                            }, width = 140.dp)
                         }
                     }
                 }
@@ -290,6 +338,7 @@ internal fun TvFeedScreen(
                                     text = when {
                                         state.error.isNotBlank() -> "本批加载失败，可按右上角刷新重试"
                                         state.loading -> "正在补载更多剧集…"
+                                        sparseBatchesPaused -> "连续多批没有新剧，按刷新继续查找"
                                         else -> "继续向下浏览，将自动加载后续内容"
                                     },
                                     color = TvColors.muted,
@@ -395,12 +444,45 @@ private fun PosterTile(
     onLongClick: () -> Unit,
 ) {
     var focused by remember(card.id) { mutableStateOf(false) }
+    var confirmKeyDown by remember(card.id) { mutableStateOf(false) }
+    var confirmLongClickHandled by remember(card.id) { mutableStateOf(false) }
     val shape = RoundedCornerShape(12.dp)
 
     Column(
         modifier = Modifier
             .then(if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
             .onFocusChanged { focused = it.isFocused }
+            // Keep the old TV behavior explicit: a held center/enter key toggles favorite,
+            // while a normal press opens the detail. Do not rely on touch long-press timing.
+            .onPreviewKeyEvent { event ->
+                val keyEvent = event.nativeKeyEvent
+                val confirm = keyEvent.keyCode == AndroidKeyEvent.KEYCODE_DPAD_CENTER ||
+                    keyEvent.keyCode == AndroidKeyEvent.KEYCODE_ENTER ||
+                    keyEvent.keyCode == AndroidKeyEvent.KEYCODE_NUMPAD_ENTER ||
+                    keyEvent.keyCode == AndroidKeyEvent.KEYCODE_BUTTON_SELECT ||
+                    keyEvent.keyCode == AndroidKeyEvent.KEYCODE_BUTTON_A
+                if (!confirm) return@onPreviewKeyEvent false
+                when (keyEvent.action) {
+                    AndroidKeyEvent.ACTION_DOWN -> {
+                        if (!confirmKeyDown) {
+                            confirmKeyDown = true
+                            confirmLongClickHandled = false
+                        }
+                        if ((keyEvent.isLongPress || keyEvent.repeatCount > 0) && !confirmLongClickHandled) {
+                            confirmLongClickHandled = true
+                            onLongClick()
+                        }
+                        true
+                    }
+                    AndroidKeyEvent.ACTION_UP -> {
+                        if (confirmKeyDown && !confirmLongClickHandled) onClick()
+                        confirmKeyDown = false
+                        confirmLongClickHandled = false
+                        true
+                    }
+                    else -> false
+                }
+            }
             .graphicsLayer {
                 val scale = if (focused) 1.035f else 1f
                 scaleX = scale

@@ -33,13 +33,14 @@ import android.widget.TextView
 import androidx.activity.ComponentActivity
 import androidx.compose.ui.platform.ComposeView
 import androidx.compose.ui.platform.ViewCompositionStrategy
-import androidx.compose.ui.platform.setContent
 import com.xiaobei206.hongguotv.ui.TvFeedFilterChoice
 import com.xiaobei206.hongguotv.ui.TvFeedFilterRow
 import com.xiaobei206.hongguotv.ui.TvFeedScreen
 import com.xiaobei206.hongguotv.ui.TvFeedUiState
 import com.xiaobei206.hongguotv.ui.TvDetailScreen
 import com.xiaobei206.hongguotv.ui.TvDetailUiState
+import com.xiaobei206.hongguotv.ui.TvInfoScreen
+import com.xiaobei206.hongguotv.ui.TvInfoAction
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
@@ -84,6 +85,7 @@ class MainActivity : ComponentActivity() {
     private var searchReturnScreen = Screen.HOME
     private var currentFeed: Feed? = null
     private var currentSeries: SeriesPage? = null
+    private var detailRevealPendingId: String? = null
     private var headerTitle = "推荐"
     private var renderedScreen: Screen? = null
     private var composeFeed by mutableStateOf<Feed?>(null)
@@ -94,7 +96,6 @@ class MainActivity : ComponentActivity() {
     private lateinit var rail: LinearLayout
     private lateinit var contentHost: FrameLayout
     private lateinit var playerLayer: FrameLayout
-    private lateinit var header: TextView
     private lateinit var playerView: PlayerView
     private lateinit var playerControls: LinearLayout
     private lateinit var playerTitle: TextView
@@ -188,7 +189,13 @@ class MainActivity : ComponentActivity() {
             setPadding(dp(12), dp(18), dp(10), dp(12))
             setBackgroundColor(0xff101925.toInt())
         }
-        rail.addView(text("红果 TV", 24f, 0xff72dba0.toInt(), true), LinearLayout.LayoutParams(-1, dp(62)))
+        val brand = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(7), dp(2), dp(7), dp(2))
+            addView(text("红果 TV", 23f, 0xff72dba0.toInt(), true), LinearLayout.LayoutParams(-1, dp(34)))
+            addView(text("大屏短剧", 12f, 0xff9bacbe.toInt()), LinearLayout.LayoutParams(-1, dp(22)))
+        }
+        rail.addView(brand, LinearLayout.LayoutParams(-1, dp(68)).apply { bottomMargin = dp(8) })
         addNav("首页", Screen.HOME)
         addNav("排行榜", Screen.RANK)
         addNav("新剧上线", Screen.NEW)
@@ -196,6 +203,8 @@ class MainActivity : ComponentActivity() {
         addNav("我的收藏", Screen.FAVORITES)
         addNav("观看历史", Screen.HISTORY)
         rail.addView(View(this), LinearLayout.LayoutParams(1, 0, 1f))
+        rail.addView(View(this).apply { setBackgroundColor(0xff273648.toInt()) },
+            LinearLayout.LayoutParams(-1, dp(1)).apply { topMargin = dp(7); bottomMargin = dp(7) })
         addNav("设备信息", Screen.DEVICE)
         addNav("设置", Screen.SETTINGS)
         contentHost = FrameLayout(this).apply { setPadding(dp(14), dp(8), dp(22), dp(12)) }
@@ -214,7 +223,9 @@ class MainActivity : ComponentActivity() {
     private fun addNav(label: String, target: Screen, action: (() -> Unit)? = null) {
         val button = navButton(label) { if (action != null) action() else navigate(target) }
         button.tag = target
-        rail.addView(button, LinearLayout.LayoutParams(-1, dp(56)))
+        rail.addView(button, LinearLayout.LayoutParams(-1, dp(48)).apply {
+            topMargin = dp(3); bottomMargin = dp(3); leftMargin = dp(2); rightMargin = dp(2)
+        })
     }
 
     private fun navigate(target: Screen) {
@@ -279,8 +290,11 @@ class MainActivity : ComponentActivity() {
 
     private fun buildFeedContent() {
         contentHost.removeAllViews()
+        composeFeed = null
+        composeFeedUi = null
+        composeDetailUi = null
         val view = ComposeView(this).apply {
-            setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnViewTreeLifecycleDestroyed)
+            setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnDetachedFromWindowOrReleasedFromPool)
         }
         contentHost.addView(view, FrameLayout.LayoutParams(-1, -1))
         view.setContent {
@@ -481,15 +495,18 @@ class MainActivity : ComponentActivity() {
         val m = model ?: return
         parentScreen = screen
         currentSeries = m.seriesPage(card.id, restartIfLoading = true)
+        detailRevealPendingId = card.id
         screen = Screen.DETAIL
         showShell()
     }
 
     private fun buildDetailContent() {
         contentHost.removeAllViews()
+        composeFeed = null
+        composeFeedUi = null
         composeDetailUi = null
         val view = ComposeView(this).apply {
-            setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnViewTreeLifecycleDestroyed)
+            setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnDetachedFromWindowOrReleasedFromPool)
         }
         contentHost.addView(view, FrameLayout.LayoutParams(-1, -1))
         view.setContent {
@@ -530,6 +547,10 @@ class MainActivity : ComponentActivity() {
 
     private fun renderDetail(snapshot: UiSnapshot) {
         val page = currentSeries ?: return
+        if (detailRevealPendingId == page.id && snapshot.series != null && snapshot.episodes.isNotEmpty()) {
+            model?.resumePoint(page)?.let { page.reveal(it.number) }
+            detailRevealPendingId = null
+        }
         val resume = model?.resumePoint(page)
         composeDetailUi = TvDetailUiState(
             seriesId = page.id,
@@ -538,7 +559,7 @@ class MainActivity : ComponentActivity() {
             resumeLabel = resume?.label ?: "播放第 1 集",
             episodes = snapshot.episodes,
             partLabels = snapshot.detailParts,
-            selectedPart = snapshot.detailPart,
+            selectedPart = snapshot.detailPart.coerceIn(0, (snapshot.detailParts.size - 1).coerceAtLeast(0)),
             currentEpisodeNumber = snapshot.currentEpisodeNumber,
             favorite = model?.favorites?.has(page.id) == true,
             loading = snapshot.detailLoading,
@@ -904,66 +925,97 @@ class MainActivity : ComponentActivity() {
 
     private fun buildInfoContent(settings: Boolean) {
         contentHost.removeAllViews()
-        val column = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(24), dp(18), dp(24), dp(18))
+        composeFeed = null
+        composeFeedUi = null
+        composeDetailUi = null
+        val view = ComposeView(this).apply {
+            setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnDetachedFromWindowOrReleasedFromPool)
         }
-        header = text(if (settings) "设置" else "设备兼容性诊断", 27f, Color.WHITE, true)
-        column.addView(header, LinearLayout.LayoutParams(-1, dp(50)))
-        if (!settings) {
-            val report = deviceReport()
-            column.addView(text(report, 16f, 0xffd3dbe5.toInt()), LinearLayout.LayoutParams(-1, 0, 1f))
-            column.addView(navButton("复制诊断信息") {
-                val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                clipboard.setPrimaryClip(ClipData.newPlainText("hongguoTV device report", report))
-                toast("诊断信息已复制")
-            }, LinearLayout.LayoutParams(dp(190), dp(48)))
-        } else {
-            val identity = tvApp.handoffServer
-            val handoffLine = identity?.let { "\n接力名称：${it.displayName}\n设备编号：${it.shortCode}" }.orEmpty()
-            column.addView(text("版本：${BuildConfig.VERSION_NAME}\n最低系统：Android 6.0 / API 23\n播放器：Media3 ExoPlayer\n签名：hongguoTV 独立签名$handoffLine",
-                18f, 0xffd3dbe5.toInt()), LinearLayout.LayoutParams(-1, dp(190)))
+        val identity = tvApp.handoffServer
+        val report = if (settings) "" else deviceReport()
+        val details = if (settings) buildList {
+            add("版本" to BuildConfig.VERSION_NAME)
+            add("最低系统" to "Android 6.0 / API 23")
+            add("播放器" to "Media3 ExoPlayer")
+            add("自动检查" to "每 12 小时一次；安装前由系统确认")
+            add("签名" to "hongguoTV 独立签名")
             if (identity != null) {
-                column.addView(navButton("修改电视显示名称") {
-                    val input = EditText(this).apply {
-                        setSingleLine(true)
-                        setText(identity.displayName)
-                        setSelection(text.length)
-                    }
-                    AlertDialog.Builder(this)
-                        .setTitle("电视显示名称")
-                        .setMessage("这个名称会显示在开心果的电视搜索列表中。")
-                        .setView(input)
-                        .setNegativeButton("取消", null)
-                        .setPositiveButton("保存") { _, _ ->
-                            if (identity.setDisplayName(input.text.toString())) {
-                                toast("电视名称已更新")
-                                buildInfoContent(true)
-                            } else {
-                                toast("名称不能为空")
+                add("接力名称" to identity.displayName)
+                add("设备编号" to identity.shortCode)
+            }
+        } else emptyList()
+        val actions = if (settings) buildList {
+            if (identity != null) {
+                add(TvInfoAction(
+                    title = "修改电视显示名称",
+                    description = "修改开心果设备列表中显示的电视名称。",
+                    onClick = {
+                        val input = EditText(this@MainActivity).apply {
+                            setSingleLine(true)
+                            setText(identity.displayName)
+                            setSelection(text.length)
+                        }
+                        AlertDialog.Builder(this@MainActivity)
+                            .setTitle("电视显示名称")
+                            .setMessage("这个名称会显示在开心果的电视搜索列表中。")
+                            .setView(input)
+                            .setNegativeButton("取消", null)
+                            .setPositiveButton("保存") { _, _ ->
+                                if (identity.setDisplayName(input.text.toString())) {
+                                    toast("电视名称已更新")
+                                    buildInfoContent(true)
+                                } else {
+                                    toast("名称不能为空")
+                                }
                             }
+                            .show()
+                    },
+                ))
+            }
+            add(TvInfoAction(
+                title = "清理封面缓存",
+                description = "释放海报图片占用的空间；不会删除收藏和观看历史。",
+                onClick = {
+                    AlertDialog.Builder(this@MainActivity)
+                        .setTitle("清理缓存")
+                        .setMessage("删除封面缓存，不会删除收藏和观看历史。")
+                        .setNegativeButton("取消", null)
+                        .setPositiveButton("清理") { _, _ ->
+                            File(cacheDir, "tv-covers").deleteRecursively()
+                            toast("封面缓存已清理")
                         }
                         .show()
-                }, LinearLayout.LayoutParams(dp(220), dp(48)))
-            }
-            column.addView(navButton("清理封面缓存") {
-                AlertDialog.Builder(this).setTitle("清理缓存")
-                    .setMessage("删除封面缓存，不会删除收藏和观看历史。")
-                    .setNegativeButton("取消", null)
-                    .setPositiveButton("清理") { _, _ ->
-                        File(cacheDir, "tv-covers").deleteRecursively()
-                        toast("封面缓存已清理")
-                    }.show()
-            }, LinearLayout.LayoutParams(dp(190), dp(48)))
-            column.addView(navButton("立即检查更新") {
-                checkForUpdate(manual = true)
-            }, LinearLayout.LayoutParams(dp(220), dp(48)))
-            column.addView(text("自动检查：每 12 小时一次。下载安装时由系统确认。", 14f, 0xff9eacbd.toInt()),
-                LinearLayout.LayoutParams(-1, dp(34)))
+                },
+            ))
+            add(TvInfoAction(
+                title = "立即检查更新",
+                description = "检查正式 Release；下载完成后由 Android 系统确认安装。",
+                primary = true,
+                onClick = { checkForUpdate(manual = true) },
+            ))
+        } else listOf(
+            TvInfoAction(
+                title = "复制诊断信息",
+                description = "将设备、存储和视频解码器信息复制到剪贴板，方便排查兼容性。",
+                primary = true,
+                onClick = {
+                    val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                    clipboard.setPrimaryClip(ClipData.newPlainText("hongguoTV device report", report))
+                    toast("诊断信息已复制")
+                },
+            ),
+        )
+        view.setContent {
+            TvInfoScreen(
+                title = if (settings) "设置" else "设备兼容性诊断",
+                intro = if (settings) "版本信息、设备接力与缓存管理。" else "检查系统、存储和解码器，定位电视兼容性问题。",
+                details = details,
+                diagnostics = report,
+                actions = actions,
+            )
         }
-        contentHost.addView(column, FrameLayout.LayoutParams(-1, -1))
+        contentHost.addView(view, FrameLayout.LayoutParams(-1, -1))
     }
-
 
     private fun checkForUpdate(manual: Boolean) {
         if (checkingForUpdate) {
@@ -1312,7 +1364,7 @@ class MainActivity : ComponentActivity() {
         }
 
     private fun buttonBackground(focused: Boolean, selected: Boolean = false) = GradientDrawable().apply {
-        cornerRadius = dp(8).toFloat()
+        cornerRadius = dp(10).toFloat()
         setColor(when {
             focused -> 0xff34465a.toInt()
             selected -> 0xff1d382f.toInt()
