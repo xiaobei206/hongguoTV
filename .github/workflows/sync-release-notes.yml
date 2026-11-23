@@ -19,14 +19,14 @@ jobs:
       - name: Update the published release body when the tag exists
         shell: bash
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: \${{ github.token }}
         run: |
           set -euo pipefail
-          VERSION="$(sed -n 's/.*versionName = "\\([^"]*\\)".*/\\1/p' app/build.gradle.kts | head -n 1)"
+          VERSION="$(sed -n 's/.*versionName = "\([^"]*\)".*/\1/p' app/build.gradle.kts | head -n 1)"
           test -n "$VERSION"
           TAG="v$VERSION"
           if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" \\
+            gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" \
               --title "红果 TV $TAG" --notes-file CHANGELOG.md
             echo "Updated published release notes for $TAG"
           else
