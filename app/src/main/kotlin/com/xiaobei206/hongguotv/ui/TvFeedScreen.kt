@@ -1,6 +1,7 @@
 package com.xiaobei206.hongguotv.ui
 
 import android.widget.ImageView
+import android.view.KeyEvent as AndroidKeyEvent
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -34,6 +35,8 @@ import androidx.compose.foundation.clickable
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.input.key.nativeKeyEvent
+import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.AndroidView
@@ -441,12 +444,43 @@ private fun PosterTile(
     onLongClick: () -> Unit,
 ) {
     var focused by remember(card.id) { mutableStateOf(false) }
+    var confirmKeyDown by remember(card.id) { mutableStateOf(false) }
+    var confirmLongClickHandled by remember(card.id) { mutableStateOf(false) }
     val shape = RoundedCornerShape(12.dp)
 
     Column(
         modifier = Modifier
             .then(if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
             .onFocusChanged { focused = it.isFocused }
+            // Keep the old TV behavior explicit: a held center/enter key toggles favorite,
+            // while a normal press opens the detail. Do not rely on touch long-press timing.
+            .onPreviewKeyEvent { event ->
+                val keyEvent = event.nativeKeyEvent
+                val confirm = keyEvent.keyCode == AndroidKeyEvent.KEYCODE_DPAD_CENTER ||
+                    keyEvent.keyCode == AndroidKeyEvent.KEYCODE_ENTER ||
+                    keyEvent.keyCode == AndroidKeyEvent.KEYCODE_NUMPAD_ENTER
+                if (!confirm) return@onPreviewKeyEvent false
+                when (keyEvent.action) {
+                    AndroidKeyEvent.ACTION_DOWN -> {
+                        if (!confirmKeyDown) {
+                            confirmKeyDown = true
+                            confirmLongClickHandled = false
+                        }
+                        if ((keyEvent.isLongPress || keyEvent.repeatCount > 0) && !confirmLongClickHandled) {
+                            confirmLongClickHandled = true
+                            onLongClick()
+                        }
+                        true
+                    }
+                    AndroidKeyEvent.ACTION_UP -> {
+                        if (confirmKeyDown && !confirmLongClickHandled) onClick()
+                        confirmKeyDown = false
+                        confirmLongClickHandled = false
+                        true
+                    }
+                    else -> false
+                }
+            }
             .graphicsLayer {
                 val scale = if (focused) 1.035f else 1f
                 scaleX = scale
@@ -461,7 +495,7 @@ private fun PosterTile(
                 shape = shape,
             )
             .combinedClickable(
-                onClick = onClick,
+                onClick = {},
                 onLongClick = onLongClick,
             )
             .focusable()
