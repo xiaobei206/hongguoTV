@@ -1,5 +1,25 @@
 # 更新日志
 
+## [1.0.3] - 2026-11-23
+
+### 播放协议同步
+- 跟进红果 11 月 23 日移动端 V5 协议更新：补齐 `x-khronos`、`x-gorgon`、`x-argus`、`x-ladon`、`x-helios`、`x-medusa` 安全签名头及 `x-xs-from-web`
+- 更新 Medusa Protobuf envelope、设备子消息、flags 与外层 field 16，加入 25 位 `sec_device_token`
+- 注册响应提取可选 `klink_egdi`，写入匿名档案并带入 V5 与 `video_tab` 播放查询
+- 旧匿名档案缺少 EGDI 时用原 `device_id + install_id` 执行同身份 `device_register` 心跳；只接受 ID 完全一致的响应，避免设备标识错配
+- EGDI 每 6 小时刷新；心跳失败或缺值后 30 分钟再试，不因一次失败清空或更换原匿名身份
+- 播放前 best-effort 执行 `app_alert_check` 设备激活；激活失败不阻断播放回退
+- HTTP 200 空响应不再单独触发自动更换匿名设备；只有服务端明确拒绝设备时才自动轮换，避免空响应耗尽设备重置次数
+
+### 诊断与兼容
+- TV 诊断记录保留设备心跳、EGDI 回填和激活过程；不输出原始匿名 ID、EGDI、Cookie、Token 或签名值
+- 将“可刷新设备”的判断收紧为明确的 `DEVICE_REJECTED`，不把 `ANONYMOUS_LIMITED` / 空响应误判为设备失效
+- 继续从共享 `openhongguo/main` 构建 Android AAR，并应用开心果维护的诊断补丁，确保 TV 与开心果使用相同协议实现
+- Release CI 执行 Go SDK / Android binding 测试、TV 单元测试、Lint、APK 签名证书一致性检查，并生成 SHA-256
+
+### 验证说明
+- 自动化构建通过不等于所有 Android TV 机型已实机验收；播放是否恢复仍以电视实机能否取得有效播放模型并完成实际播放为准
+
 ## [1.0.2] - 2026-11-23
 
 ### 修复
@@ -27,7 +47,6 @@
 
 ### 修复
 - 交接失败或电视加载超时会停止本次未成功的播放任务并返回明确原因
-
 
 ## [1.0.0] - 2026-11-23
 

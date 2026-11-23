@@ -98,7 +98,7 @@ data class PlaybackFailure(
     val events: List<SdkApiTrace>,
 ) {
     val canRefreshDevice: Boolean
-        get() = sdkCode == ErrorCode.ANONYMOUS_LIMITED.name || sdkCode == ErrorCode.DEVICE_REJECTED.name
+        get() = sdkCode == ErrorCode.DEVICE_REJECTED.name
 
     fun toReport(): String = buildString {
         appendLine("hongguoTV Android TV 播放故障诊断")
