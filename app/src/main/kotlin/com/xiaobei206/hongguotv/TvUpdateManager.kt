@@ -20,6 +20,8 @@ data class TvUpdateRelease(
     val checksumUrl: String,
     val notes: String,
     val pageUrl: String,
+    /** SHA-256 reported by the authenticated GitHub Release API asset metadata. */
+    val apkSha256: String = "",
 )
 
 sealed class TvUpdateCheck {
@@ -72,15 +74,23 @@ class TvUpdateManager(context: Context) {
             val sumName = "hongguoTV-v$version-SHA256SUMS.txt"
             var apkUrl = ""
             var checksumUrl = ""
+            var apkSha256 = ""
             for (i in 0 until assets.length()) {
                 val asset = assets.optJSONObject(i) ?: continue
                 when (asset.optString("name")) {
-                    apkName -> apkUrl = asset.optString("browser_download_url")
+                    apkName -> {
+                        apkUrl = asset.optString("browser_download_url")
+                        apkSha256 = asset.optString("digest")
+                            .removePrefix("sha256:")
+                            .lowercase()
+                            .takeIf { it.matches(Regex("[0-9a-f]{64}")) }
+                            .orEmpty()
+                    }
                     sumName -> checksumUrl = asset.optString("browser_download_url")
                 }
             }
-            if (apkUrl.isBlank() || checksumUrl.isBlank()) {
-                return@withContext TvUpdateCheck.Failed("Release 附件不完整，找不到 APK 或 SHA-256 校验文件")
+            if (apkUrl.isBlank() || (checksumUrl.isBlank() && apkSha256.isBlank())) {
+                return@withContext TvUpdateCheck.Failed("Release 附件不完整，找不到 APK 或可验证的 SHA-256 摘要")
             }
             TvUpdateCheck.Available(
                 TvUpdateRelease(
@@ -91,6 +101,7 @@ class TvUpdateManager(context: Context) {
                     checksumUrl = checksumUrl,
                     notes = release.optString("body"),
                     pageUrl = release.optString("html_url"),
+                    apkSha256 = apkSha256,
                 )
             )
         } catch (e: Exception) {
@@ -100,12 +111,17 @@ class TvUpdateManager(context: Context) {
     }
 
     suspend fun downloadAndVerify(release: TvUpdateRelease): File = withContext(Dispatchers.IO) {
-        val checksumText = requestText(release.checksumUrl, 32 * 1024)
-        val expected = checksumText.lineSequence()
-            .map { it.trim().split(Regex("\\s+")).firstOrNull().orEmpty() }
-            .firstOrNull { it.matches(Regex("[0-9a-fA-F]{64}")) }
+        // Prefer the digest included in the official Release API response. This avoids
+        // needing a second TLS connection to the release-asset CDN just to fetch sums.
+        // If an older release has no API digest, use the original checksum URL with
+        // normal TLS validation; never trust a checksum fetched from an unverified mirror.
+        val expected = release.apkSha256.takeIf { it.matches(Regex("[0-9a-fA-F]{64}")) }
             ?.lowercase()
-            ?: throw IOException("Release 的 SHA-256 文件格式无效")
+            ?: requestText(release.checksumUrl, 32 * 1024).lineSequence()
+                .map { it.trim().split(Regex("\\s+")).firstOrNull().orEmpty() }
+                .firstOrNull { it.matches(Regex("[0-9a-fA-F]{64}")) }
+                ?.lowercase()
+            ?: throw IOException("Release 的 SHA-256 摘要缺失或格式无效，已停止安装")
 
         val folder = File(appContext.cacheDir, "updates").apply { mkdirs() }
         val target = File(folder, release.apkName)
@@ -114,51 +130,105 @@ class TvUpdateManager(context: Context) {
         }
         target.delete()
         val temp = File(folder, release.apkName + ".download")
-        temp.delete()
-        val connection = (URL(release.apkUrl).openConnection() as HttpURLConnection).apply {
-            connectTimeout = 12_000
-            readTimeout = 18_000
-            instanceFollowRedirects = true
-            setRequestProperty("User-Agent", "hongguoTV/${BuildConfig.VERSION_NAME}")
-            setRequestProperty("Accept", "application/vnd.android.package-archive,application/octet-stream,*/*")
-        }
-        try {
-            val code = connection.responseCode
-            if (code !in 200..299) throw IOException("APK 下载 HTTP $code")
-            if (connection.contentLength.toLong() > MAX_APK_BYTES) throw IOException("APK 超过大小限制")
-            val digest = MessageDigest.getInstance("SHA-256")
-            var total = 0L
-            connection.inputStream.use { input ->
-                FileOutputStream(temp).use { output ->
-                    val buffer = ByteArray(64 * 1024)
-                    while (true) {
-                        val n = input.read(buffer)
-                        if (n < 0) break
-                        total += n
-                        if (total > MAX_APK_BYTES) throw IOException("APK 超过大小限制")
-                        digest.update(buffer, 0, n)
-                        output.write(buffer, 0, n)
-                    }
-                    output.fd.sync()
-                }
-            }
-            val actual = digest.digest().joinToString("") { "%02x".format(it) }
-            if (!actual.equals(expected, ignoreCase = true)) {
-                temp.delete()
-                throw IOException("SHA-256 校验失败，已删除下载文件")
-            }
-            if (!temp.renameTo(target)) {
-                temp.copyTo(target, overwrite = true)
-                temp.delete()
-            }
-            target
-        } catch (e: Exception) {
+        val failures = ArrayList<String>()
+
+        for ((index, sourceUrl) in downloadCandidates(release.apkUrl).withIndex()) {
             temp.delete()
-            Log.w(TAG, "APK download failed version=${release.version}", e)
-            throw e
-        } finally {
-            connection.disconnect()
+            var connection: HttpURLConnection? = null
+            try {
+                val sourceHost = URL(sourceUrl).host
+                Log.i(TAG, "APK download attempt version=${release.version} source=${index + 1} host=$sourceHost")
+                connection = (URL(sourceUrl).openConnection() as HttpURLConnection).apply {
+                    connectTimeout = 12_000
+                    readTimeout = 25_000
+                    instanceFollowRedirects = true
+                    setRequestProperty("User-Agent", "hongguoTV/${BuildConfig.VERSION_NAME}")
+                    setRequestProperty("Accept", "application/vnd.android.package-archive,application/octet-stream,*/*")
+                }
+                val code = connection.responseCode
+                if (code !in 200..299) throw IOException("HTTP $code")
+                if (connection.contentLength.toLong() > MAX_APK_BYTES) throw IOException("APK 超过大小限制")
+
+                val digest = MessageDigest.getInstance("SHA-256")
+                var total = 0L
+                connection.inputStream.use { input ->
+                    FileOutputStream(temp).use { output ->
+                        val buffer = ByteArray(64 * 1024)
+                        while (true) {
+                            val n = input.read(buffer)
+                            if (n < 0) break
+                            total += n
+                            if (total > MAX_APK_BYTES) throw IOException("APK 超过大小限制")
+                            digest.update(buffer, 0, n)
+                            output.write(buffer, 0, n)
+                        }
+                        output.fd.sync()
+                    }
+                }
+                val actual = digest.digest().joinToString("") { "%02x".format(it) }
+                if (!actual.equals(expected, ignoreCase = true)) {
+                    temp.delete()
+                    throw IOException("SHA-256 不匹配")
+                }
+                if (!temp.renameTo(target)) {
+                    temp.copyTo(target, overwrite = true)
+                    temp.delete()
+                }
+                Log.i(TAG, "APK downloaded and SHA-256 verified version=${release.version} source=$sourceHost bytes=$total")
+                return@withContext target
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                temp.delete()
+                throw e
+            } catch (e: Exception) {
+                temp.delete()
+                val host = runCatching { URL(sourceUrl).host }.getOrDefault("unknown")
+                val trustIssue = hasCertificateTrustError(e)
+                val description = if (trustIssue) {
+                    "$host: HTTPS 证书不受电视系统信任"
+                } else {
+                    "$host: ${e.javaClass.simpleName} ${e.message.orEmpty().take(100)}"
+                }
+                failures += description
+                Log.w(TAG, "APK source failed version=${release.version} host=$host trustIssue=$trustIssue", e)
+            } finally {
+                connection?.disconnect()
+            }
         }
+        throw IOException(
+            "所有 HTTPS 下载源均失败，证书校验未关闭，安装包也未跳过 SHA-256 校验。\n" +
+                failures.joinToString("\n").take(500) +
+                "\n请检查电视系统日期；也可从手机或电脑下载官方 APK 后用 U 盘安装。"
+        )
+    }
+
+    /**
+     * The alternate services are untrusted byte relays, not trust anchors. The APK
+     * is accepted only when its SHA-256 matches the digest from the authenticated
+     * GitHub Release API response.
+     */
+    internal fun downloadCandidates(original: String): List<String> {
+        if (!original.startsWith("https://github.com/", ignoreCase = true)) return listOf(original)
+        return listOf(
+            original,
+            "https://ghfast.top/$original",
+            "https://gh-proxy.com/$original",
+            "https://ghproxy.net/$original",
+        ).distinct()
+    }
+
+    private fun hasCertificateTrustError(error: Throwable): Boolean {
+        var current: Throwable? = error
+        var checked = 0
+        while (current != null && checked < 12) {
+            if (current is java.security.cert.CertPathValidatorException ||
+                current.message?.contains("Trust anchor for certification path not found", ignoreCase = true) == true ||
+                current.message?.contains("certification path not found", ignoreCase = true) == true) {
+                return true
+            }
+            current = current.cause
+            checked++
+        }
+        return false
     }
 
     private fun requestText(url: String, limit: Int): String {
