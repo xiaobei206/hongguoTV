@@ -325,7 +325,6 @@ class MainActivity : ComponentActivity() {
 
     private fun doSearch(query: String) {
         val m = model ?: return
-        parentScreen = Screen.HOME
         currentFeed = m.searchFeed(query)
         headerTitle = "搜索：$query"
         screen = Screen.SEARCH
@@ -375,7 +374,7 @@ class MainActivity : ComponentActivity() {
             tag = "detail-actions"
         }
         left.addView(actions, LinearLayout.LayoutParams(-1, ViewGroup.LayoutParams.WRAP_CONTENT))
-        leftScroll.addView(left, ScrollView.LayoutParams(-1, ViewGroup.LayoutParams.WRAP_CONTENT))
+        leftScroll.addView(left, FrameLayout.LayoutParams(-1, ViewGroup.LayoutParams.WRAP_CONTENT))
 
         val right = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -787,7 +786,13 @@ class MainActivity : ComponentActivity() {
         else -> null
     }
 
+    override fun onStart() {
+        super.onStart()
+        model?.player?.returnToApp()
+    }
+
     override fun onStop() {
+        model?.player?.leaveApp()
         model?.let { it.saveSession(it.session()); it.flush() }
         super.onStop()
     }
