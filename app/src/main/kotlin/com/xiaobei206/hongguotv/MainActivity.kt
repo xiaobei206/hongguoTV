@@ -26,8 +26,6 @@ import android.view.inputmethod.InputMethodManager
 import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.GridLayout
-import android.widget.HorizontalScrollView
-import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.SeekBar
@@ -46,8 +44,6 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
 import androidx.media3.ui.PlayerView
-import androidx.recyclerview.widget.GridLayoutManager
-import androidx.recyclerview.widget.RecyclerView
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -69,13 +65,10 @@ import dev.openhongguo.Episode
 import dev.openhongguo.RankBoard
 import dev.openhongguo.RankContent
 import kotlinx.coroutines.flow.distinctUntilChanged
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
-import kotlin.math.ceil
 
 @androidx.media3.common.util.UnstableApi
 class MainActivity : ComponentActivity() {
@@ -102,7 +95,6 @@ class MainActivity : ComponentActivity() {
     private lateinit var contentHost: FrameLayout
     private lateinit var playerLayer: FrameLayout
     private lateinit var header: TextView
-    private lateinit var subHeader: TextView
     private lateinit var playerView: PlayerView
     private lateinit var playerControls: LinearLayout
     private lateinit var playerTitle: TextView
