@@ -140,26 +140,32 @@ internal fun TvDetailScreen(
                         modifier = Modifier.weight(1f),
                         verticalArrangement = Arrangement.spacedBy(10.dp),
                     ) {
-                        DetailActionButton(
-                            label = state.resumeLabel,
-                            primary = true,
-                            focusRequester = playFocus,
-                            onClick = onPlay,
-                        )
-                        DetailActionButton(
-                            label = if (state.favorite) "★ 已收藏" else "☆ 收藏",
-                            primary = false,
-                            onClick = onFavorite,
-                        )
-                        if (state.error.isNotBlank() && state.series == null) {
+                        if (state.series != null) {
+                            DetailActionButton(
+                                label = state.resumeLabel,
+                                primary = true,
+                                focusRequester = playFocus,
+                                onClick = onPlay,
+                            )
+                            DetailActionButton(
+                                label = if (state.favorite) "★ 已收藏" else "☆ 收藏",
+                                primary = false,
+                                onClick = onFavorite,
+                            )
+                        } else if (state.error.isNotBlank()) {
                             DetailActionButton(
                                 label = "重新加载",
                                 primary = false,
                                 onClick = onRetry,
                             )
+                        } else {
+                            Text(
+                                text = "正在准备播放信息…",
+                                color = TvDetailColors.muted,
+                                fontSize = 13.sp,
+                            )
                         }
-                    }
-                }
+                    }                }
                 Spacer(Modifier.height(20.dp))
                 Text(
                     text = "剧情简介",
