@@ -1,0 +1,821 @@
+package com.xiaobei206.hongguotv
+
+import android.app.ActivityManager
+import android.app.AlertDialog
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
+import android.graphics.Color
+import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
+import android.media.MediaCodecList
+import android.os.Build
+import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.os.StatFs
+import android.text.InputType
+import android.view.Gravity
+import android.view.KeyEvent
+import android.view.View
+import android.view.ViewGroup
+import android.view.WindowManager
+import android.view.inputmethod.InputMethodManager
+import android.widget.EditText
+import android.widget.FrameLayout
+import android.widget.GridLayout
+import android.widget.ImageView
+import android.widget.LinearLayout
+import android.widget.ScrollView
+import android.widget.SeekBar
+import android.widget.TextView
+import androidx.activity.ComponentActivity
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.repeatOnLifecycle
+import androidx.media3.ui.PlayerView
+import androidx.recyclerview.widget.GridLayoutManager
+import androidx.recyclerview.widget.RecyclerView
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
+import com.xiaobei206.hongguotv.model.AppModel
+import com.xiaobei206.hongguotv.model.Card
+import com.xiaobei206.hongguotv.model.Fav
+import com.xiaobei206.hongguotv.model.Feed
+import com.xiaobei206.hongguotv.model.PlayerState
+import com.xiaobei206.hongguotv.model.SeriesPage
+import com.xiaobei206.hongguotv.model.TimeControl
+import com.xiaobei206.hongguotv.model.friendly
+import com.xiaobei206.hongguotv.model.metaLine
+import dev.openhongguo.Episode
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.launch
+import java.io.File
+
+class MainActivity : ComponentActivity() {
+    private enum class Screen { HOME, RANK, NEW, SEARCH, FAVORITES, HISTORY, DETAIL, PLAYER, DEVICE, SETTINGS }
+
+    private val tvApp get() = application as TvApplication
+    private val model: AppModel? get() = tvApp.model
+    private var screen by mutableStateOf(Screen.HOME)
+    private var parentScreen = Screen.HOME
+    private var currentFeed: Feed? = null
+    private var currentSeries: SeriesPage? = null
+    private var headerTitle = "推荐"
+    private var renderedScreen: Screen? = null
+
+    private lateinit var shell: LinearLayout
+    private lateinit var rail: LinearLayout
+    private lateinit var contentHost: FrameLayout
+    private lateinit var playerLayer: FrameLayout
+    private lateinit var header: TextView
+    private lateinit var subHeader: TextView
+    private lateinit var recycler: RecyclerView
+    private lateinit var emptyState: TextView
+    private lateinit var cardAdapter: TvCardAdapter
+    private lateinit var playerView: PlayerView
+    private lateinit var playerControls: LinearLayout
+    private lateinit var playerTitle: TextView
+    private lateinit var playerMessage: TextView
+    private lateinit var playerSeek: SeekBar
+    private lateinit var playButton: TextView
+    private lateinit var speedButton: TextView
+    private lateinit var qualityButton: TextView
+    private lateinit var retryButton: TextView
+    private lateinit var progressText: TextView
+    private var episodeDialog: AlertDialog? = null
+
+    private val handler = Handler(Looper.getMainLooper())
+    private var progressTask: Runnable? = null
+    private val hideControls = Runnable {
+        if (screen == Screen.PLAYER && model?.player?.paused == false) {
+            playerControls.visibility = View.GONE
+        }
+    }
+
+    private data class UiSnapshot(
+        val cards: List<Card>,
+        val loading: Boolean,
+        val feedError: String,
+        val series: dev.openhongguo.Series?,
+        val episodes: List<Episode>,
+        val detailLoading: Boolean,
+        val detailError: String,
+        val playerState: PlayerState,
+        val playerNumber: Int,
+        val playerSpeed: Float,
+        val playerQuality: Int,
+        val playerQualities: List<Int>,
+        val favoritesCount: Int,
+        val historyCount: Int,
+    )
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        @Suppress("DEPRECATION")
+        window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_FULLSCREEN or
+            View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+        buildShell()
+        val m = model
+        if (m == null) {
+            showStartupError(tvApp.startupError)
+            return
+        }
+        cardAdapter = TvCardAdapter(this, tvApp.artwork, ::openDetail) { card ->
+            val added = m.favorites.toggle(Fav.of(card))
+            toast(if (added) "已收藏：${card.title}" else "已取消收藏：${card.title}")
+        }
+        enterFeed(Screen.HOME)
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                snapshotFlow { makeSnapshot() }.distinctUntilChanged().collect { renderSnapshot(it) }
+            }
+        }
+        if (m.lastSession.player != null) {
+            parentScreen = Screen.HOME
+            screen = Screen.PLAYER
+            m.reopenPlayer()
+            showPlayer()
+        }
+    }
+
+    private fun buildShell() {
+        val root = FrameLayout(this).apply { setBackgroundColor(0xff0b1018.toInt()) }
+        shell = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        rail = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(12), dp(18), dp(10), dp(12))
+            setBackgroundColor(0xff101925.toInt())
+        }
+        rail.addView(text("红果 TV", 24f, 0xffffb45c.toInt(), true), LinearLayout.LayoutParams(-1, dp(64)))
+        addNav("首页", Screen.HOME)
+        addNav("排行榜", Screen.RANK)
+        addNav("新剧上线", Screen.NEW)
+        addNav("搜索", Screen.SEARCH) { openSearchDialog() }
+        addNav("我的收藏", Screen.FAVORITES)
+        addNav("观看历史", Screen.HISTORY)
+        rail.addView(View(this), LinearLayout.LayoutParams(1, 0, 1f))
+        addNav("设备信息", Screen.DEVICE)
+        addNav("设置", Screen.SETTINGS)
+        contentHost = FrameLayout(this).apply { setPadding(dp(10), dp(6), dp(18), dp(10)) }
+        shell.addView(rail, LinearLayout.LayoutParams(dp(170), -1))
+        shell.addView(contentHost, LinearLayout.LayoutParams(0, -1, 1f))
+        root.addView(shell, FrameLayout.LayoutParams(-1, -1))
+        playerLayer = FrameLayout(this).apply {
+            visibility = View.GONE
+            setBackgroundColor(Color.BLACK)
+        }
+        root.addView(playerLayer, FrameLayout.LayoutParams(-1, -1))
+        setContentView(root)
+        buildPlayerLayer()
+    }
+
+    private fun addNav(label: String, target: Screen, action: (() -> Unit)? = null) {
+        val button = navButton(label) { if (action != null) action() else navigate(target) }
+        rail.addView(button, LinearLayout.LayoutParams(-1, dp(52)))
+    }
+
+    private fun navigate(target: Screen) {
+        when (target) {
+            Screen.HOME, Screen.RANK, Screen.NEW -> enterFeed(target)
+            Screen.FAVORITES, Screen.HISTORY, Screen.DEVICE, Screen.SETTINGS -> {
+                parentScreen = Screen.HOME
+                currentFeed = null
+                screen = target
+                showShell()
+            }
+            Screen.SEARCH -> openSearchDialog()
+            else -> Unit
+        }
+    }
+
+    private fun enterFeed(target: Screen) {
+        val m = model ?: return
+        parentScreen = target
+        currentSeries = null
+        currentFeed = when (target) {
+            Screen.HOME -> m.home
+            Screen.RANK -> m.rankFeed
+            Screen.NEW -> m.newFeed
+            else -> null
+        }
+        headerTitle = when (target) {
+            Screen.HOME -> "推荐"
+            Screen.RANK -> "排行榜"
+            Screen.NEW -> "新剧上线"
+            else -> "搜索结果"
+        }
+        screen = target
+        currentFeed?.let { if (!it.started || it.stale) it.loadMore() }
+        showShell()
+    }
+
+    private fun showShell() {
+        shell.visibility = View.VISIBLE
+        playerLayer.visibility = View.GONE
+        window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        if (renderedScreen != screen) {
+            renderedScreen = screen
+            when (screen) {
+                Screen.HOME, Screen.RANK, Screen.NEW, Screen.SEARCH, Screen.FAVORITES, Screen.HISTORY -> buildFeedContent()
+                Screen.DETAIL -> buildDetailContent()
+                Screen.DEVICE -> buildInfoContent(false)
+                Screen.SETTINGS -> buildInfoContent(true)
+                Screen.PLAYER -> showPlayer()
+            }
+        }
+        renderSnapshot(makeSnapshot())
+    }
+
+    private fun buildFeedContent() {
+        contentHost.removeAllViews()
+        val column = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        val top = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+        header = text(headerTitle, 27f, Color.WHITE, true)
+        top.addView(header, LinearLayout.LayoutParams(0, dp(52), 1f))
+        top.addView(navButton("搜索") { openSearchDialog() }, LinearLayout.LayoutParams(dp(90), dp(42)))
+        top.addView(navButton("刷新") { refreshCurrentFeed() }, LinearLayout.LayoutParams(dp(90), dp(42)))
+        column.addView(top)
+        subHeader = text("遥控器方向键选择 · 确认打开详情 · 长按海报收藏", 14f, 0xffa7b2c2.toInt())
+        column.addView(subHeader, LinearLayout.LayoutParams(-1, dp(30)))
+        recycler = RecyclerView(this).apply {
+            layoutManager = GridLayoutManager(this@MainActivity, gridColumns())
+            adapter = cardAdapter
+            setHasFixedSize(true)
+            itemViewCacheSize = 3
+            overScrollMode = View.OVER_SCROLL_NEVER
+            setPadding(dp(2), dp(4), dp(2), dp(10))
+            clipToPadding = false
+            addOnScrollListener(object : RecyclerView.OnScrollListener() {
+                override fun onScrolled(rv: RecyclerView, dx: Int, dy: Int) {
+                    val manager = rv.layoutManager as? GridLayoutManager ?: return
+                    val feed = currentFeed ?: return
+                    if (manager.findLastVisibleItemPosition() >= manager.itemCount - gridColumns() * 2 &&
+                        feed.wantsMore && !feed.loading) feed.loadMore()
+                }
+            })
+        }
+        val frame = FrameLayout(this)
+        frame.addView(recycler, FrameLayout.LayoutParams(-1, -1))
+        emptyState = text("正在连接红果…", 18f, 0xffa7b2c2.toInt()).apply { gravity = Gravity.CENTER }
+        frame.addView(emptyState, FrameLayout.LayoutParams(-1, -1))
+        column.addView(frame, LinearLayout.LayoutParams(-1, 0, 1f))
+        contentHost.addView(column, FrameLayout.LayoutParams(-1, -1))
+    }
+
+    private fun renderFeed(snapshot: UiSnapshot) {
+        cardAdapter.submit(snapshot.cards)
+        val hasCards = snapshot.cards.isNotEmpty()
+        emptyState.visibility = if (hasCards) View.GONE else View.VISIBLE
+        emptyState.text = when {
+            snapshot.loading -> "正在加载…"
+            snapshot.feedError.isNotBlank() -> "${snapshot.feedError}\n按刷新重试"
+            screen == Screen.FAVORITES -> "还没有收藏\n在剧集详情中保存喜欢的作品"
+            screen == Screen.HISTORY -> "还没有观看记录"
+            else -> "暂时没有内容\n按刷新重新获取"
+        }
+        header.text = headerTitle
+        subHeader.text = if (hasCards) "共 ${snapshot.cards.size} 部 · 长按海报收藏" else "红果内容通过网络加载 · 请确认电视已联网"
+    }
+
+    private fun refreshCurrentFeed() {
+        val feed = currentFeed ?: return
+        feed.retry()
+    }
+
+    private fun openSearchDialog() {
+        val edit = EditText(this).apply {
+            setSingleLine(true)
+            textSize = 20f
+            setTextColor(Color.WHITE)
+            hint = "输入剧名（可使用电视语音输入）"
+            setHintTextColor(0xff9ca9b8.toInt())
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_AUTO_CORRECT
+            setPadding(dp(12), dp(10), dp(12), dp(10))
+            isFocusable = true
+            isFocusableInTouchMode = true
+        }
+        val dialog = AlertDialog.Builder(this, android.R.style.Theme_Material_Dialog_Alert)
+            .setTitle("搜索红果短剧")
+            .setView(edit)
+            .setPositiveButton("搜索") { _, _ ->
+                val query = edit.text.toString().trim()
+                if (query.isNotEmpty()) doSearch(query)
+            }
+            .setNegativeButton("取消", null)
+            .create()
+        dialog.setOnShowListener {
+            edit.requestFocus()
+            edit.post {
+                val input = getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
+                input.showSoftInput(edit, InputMethodManager.SHOW_IMPLICIT)
+            }
+        }
+        dialog.show()
+    }
+
+    private fun doSearch(query: String) {
+        val m = model ?: return
+        parentScreen = Screen.HOME
+        currentFeed = m.searchFeed(query)
+        headerTitle = "搜索：$query"
+        screen = Screen.SEARCH
+        currentFeed?.loadMore()
+        showShell()
+    }
+
+    private fun openDetail(card: Card) {
+        val m = model ?: return
+        parentScreen = screen
+        currentSeries = m.seriesPage(card.id)
+        screen = Screen.DETAIL
+        showShell()
+    }
+
+    private fun buildDetailContent() {
+        contentHost.removeAllViews()
+        val scroll = ScrollView(this).apply { isFillViewport = true }
+        val column = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(24), dp(18), dp(24), dp(24))
+        }
+        header = text("剧集详情", 28f, Color.WHITE, true)
+        column.addView(header)
+        subHeader = text("正在读取剧集信息…", 16f, 0xffa7b2c2.toInt())
+        column.addView(subHeader, LinearLayout.LayoutParams(-1, dp(42)))
+        val actions = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            tag = "detail-actions"
+        }
+        column.addView(actions)
+        val poster = ImageView(this).apply {
+            scaleType = ImageView.ScaleType.CENTER_CROP
+            tag = "detail-cover"
+            setBackgroundColor(0xff243449.toInt())
+        }
+        column.addView(poster, LinearLayout.LayoutParams(dp(160), dp(220)).apply {
+            topMargin = dp(12); bottomMargin = dp(12)
+        })
+        column.addView(text("剧情简介", 20f, Color.WHITE, true))
+        val description = text("", 16f, 0xffd2d9e2.toInt()).apply { tag = "detail-description" }
+        column.addView(description, LinearLayout.LayoutParams(-1, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+            bottomMargin = dp(18)
+        })
+        column.addView(text("选集", 21f, Color.WHITE, true), LinearLayout.LayoutParams(-1, dp(40)))
+        val episodes = RecyclerView(this).apply {
+            tag = "detail-episodes"
+            layoutManager = GridLayoutManager(this@MainActivity, 8)
+            adapter = TvEpisodeAdapter(this@MainActivity) { episode ->
+                val id = currentSeries?.id ?: return@TvEpisodeAdapter
+                if (episode.playable) startPlayer(id, episode.number, 0.0) else toast("这一集暂不可播放")
+            }
+            setHasFixedSize(true)
+            isNestedScrollingEnabled = false
+        }
+        column.addView(episodes, LinearLayout.LayoutParams(-1, dp(330)))
+        scroll.addView(column)
+        contentHost.addView(scroll, FrameLayout.LayoutParams(-1, -1))
+    }
+
+    private fun renderDetail(snapshot: UiSnapshot) {
+        val page = currentSeries ?: return
+        header.text = snapshot.series?.title ?: "剧集详情"
+        subHeader.text = when {
+            snapshot.series != null -> metaLine(snapshot.series)
+            snapshot.detailError.isNotBlank() -> snapshot.detailError
+            else -> "正在加载剧集信息…"
+        }
+        contentHost.findViewWithTag<TextView>("detail-description")?.text = snapshot.series?.description.orEmpty()
+        val poster = contentHost.findViewWithTag<ImageView>("detail-cover")
+        if (snapshot.series != null && poster != null && poster.tag != snapshot.series.coverUrl) {
+            poster.tag = snapshot.series.coverUrl
+            tvApp.artwork.load(snapshot.series.coverUrl, poster)
+        }
+        val actions = contentHost.findViewWithTag<LinearLayout>("detail-actions") ?: return
+        if (actions.childCount == 0 && snapshot.series != null) {
+            val series = snapshot.series
+            val resume = model?.resumePoint(page)
+            actions.addView(navButton(resume?.label ?: "播放第 1 集") {
+                if (resume != null) startPlayer(resume.seriesID, resume.number, resume.start)
+                else startPlayer(page.id, 1, 0.0)
+            }, LinearLayout.LayoutParams(dp(210), dp(48)))
+            actions.addView(navButton("☆ 收藏") {
+                val added = model?.favorites?.toggle(Fav.of(Card.of(series))) == true
+                toast(if (added) "已收藏" else "已取消收藏")
+                (it as? TextView)?.text = if (added) "★ 已收藏" else "☆ 收藏"
+            }, LinearLayout.LayoutParams(dp(140), dp(48)).apply { leftMargin = dp(12) })
+        } else if (actions.childCount == 0 && snapshot.detailError.isNotBlank()) {
+            actions.addView(navButton("重新加载") { model?.loadSeries(page) })
+        }
+        val adapter = contentHost.findViewWithTag<RecyclerView>("detail-episodes")?.adapter as? TvEpisodeAdapter
+        adapter?.submit(snapshot.episodes, model?.player?.number ?: 0)
+    }
+
+    private fun startPlayer(seriesId: String, episode: Int, start: Double) {
+        val m = model ?: return
+        parentScreen = screen
+        m.player.play(seriesId, episode, start)
+        screen = Screen.PLAYER
+        showPlayer()
+    }
+
+    private fun buildPlayerLayer() {
+        playerLayer.removeAllViews()
+        playerView = PlayerView(this).apply {
+            player = tvApp.video.exo
+            useController = false
+            setShowBuffering(PlayerView.SHOW_BUFFERING_ALWAYS)
+            isFocusable = true
+            isFocusableInTouchMode = true
+            setOnClickListener { togglePlayerPause() }
+            setOnKeyListener { _, keyCode, event ->
+                if (event.action != KeyEvent.ACTION_DOWN) return@setOnKeyListener false
+                when (keyCode) {
+                    KeyEvent.KEYCODE_DPAD_LEFT -> { model?.player?.skip(-10.0); revealPlayerControls(); true }
+                    KeyEvent.KEYCODE_DPAD_RIGHT -> { model?.player?.skip(10.0); revealPlayerControls(); true }
+                    KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_MENU -> { revealPlayerControls(); true }
+                    KeyEvent.KEYCODE_DPAD_DOWN -> { openEpisodeDialog(); true }
+                    KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER, KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE -> { togglePlayerPause(); revealPlayerControls(); true }
+                    KeyEvent.KEYCODE_BACK -> { leavePlayer(); true }
+                    else -> false
+                }
+            }
+        }
+        playerLayer.addView(playerView, FrameLayout.LayoutParams(-1, -1))
+
+        val top = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(22), dp(12), dp(22), dp(10))
+            background = GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM,
+                intArrayOf(0xdd07101b.toInt(), 0x0007101b))
+        }
+        playerTitle = text("红果 TV", 20f, Color.WHITE, true)
+        top.addView(playerTitle, LinearLayout.LayoutParams(0, dp(46), 1f))
+        top.addView(navButton("退出播放") { leavePlayer() }, LinearLayout.LayoutParams(dp(126), dp(42)))
+        playerLayer.addView(top, FrameLayout.LayoutParams(-1, dp(66), Gravity.TOP))
+
+        playerControls = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(20), dp(12), dp(20), dp(16))
+            background = GradientDrawable(GradientDrawable.Orientation.BOTTOM_TOP,
+                intArrayOf(0xee07101b.toInt(), 0x0007101b))
+        }
+        playerMessage = text("", 15f, 0xffffc77f.toInt())
+        playerControls.addView(playerMessage, LinearLayout.LayoutParams(-1, dp(28)))
+        playerSeek = SeekBar(this).apply {
+            max = 1000
+            progressTintList = android.content.res.ColorStateList.valueOf(0xffffb45c.toInt())
+            thumbTintList = android.content.res.ColorStateList.valueOf(0xffffb45c.toInt())
+        }
+        playerControls.addView(playerSeek, LinearLayout.LayoutParams(-1, dp(34)))
+        progressText = text("00:00 / 00:00", 13f, 0xffd1d9e2.toInt())
+        playerControls.addView(progressText)
+        playerSeek.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) = Unit
+            override fun onStartTrackingTouch(seekBar: SeekBar?) = revealPlayerControls()
+            override fun onStopTrackingTouch(seekBar: SeekBar?) {
+                val player = model?.player ?: return
+                val duration = player.video.duration
+                if (duration.isFinite()) player.video.seek(duration * ((seekBar?.progress ?: 0) / 1000.0))
+            }
+        })
+        val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER }
+        playButton = navButton("播放/暂停") { togglePlayerPause() }
+        row.addView(playButton, LinearLayout.LayoutParams(dp(126), dp(46)).apply { rightMargin = dp(7) })
+        row.addView(navButton("上一集") { model?.player?.step(-1) }, LinearLayout.LayoutParams(dp(102), dp(46)).apply { rightMargin = dp(7) })
+        row.addView(navButton("下一集") { model?.player?.step(1) }, LinearLayout.LayoutParams(dp(102), dp(46)).apply { rightMargin = dp(7) })
+        row.addView(navButton("选集") { openEpisodeDialog() }, LinearLayout.LayoutParams(dp(90), dp(46)).apply { rightMargin = dp(7) })
+        speedButton = navButton("倍速 1×") { chooseNextSpeed() }
+        row.addView(speedButton, LinearLayout.LayoutParams(dp(108), dp(46)).apply { rightMargin = dp(7) })
+        qualityButton = navButton("画质") { chooseNextQuality() }
+        row.addView(qualityButton, LinearLayout.LayoutParams(dp(90), dp(46)))
+        playerControls.addView(row)
+        retryButton = navButton("重试播放") { model?.player?.retry() }
+        retryButton.visibility = View.GONE
+        playerControls.addView(retryButton, LinearLayout.LayoutParams(dp(140), dp(42)).apply { topMargin = dp(6) })
+        playerLayer.addView(playerControls, FrameLayout.LayoutParams(-1, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM))
+    }
+
+    private fun revealPlayerControls() {
+        playerControls.visibility = View.VISIBLE
+        handler.removeCallbacks(hideControls)
+        if (model?.player?.paused == false) handler.postDelayed(hideControls, 6_000)
+    }
+
+    private fun togglePlayerPause() {
+        model?.player?.togglePause()
+        revealPlayerControls()
+    }
+
+    private fun showPlayer() {
+        renderedScreen = Screen.PLAYER
+        shell.visibility = View.GONE
+        playerLayer.visibility = View.VISIBLE
+        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        renderPlayerState()
+        playerControls.visibility = View.GONE
+        playerView.requestFocus()
+        progressTask?.let(handler::removeCallbacks)
+        val task = object : Runnable {
+            override fun run() {
+                if (screen != Screen.PLAYER) return
+                updateProgress()
+                handler.postDelayed(this, 700)
+            }
+        }
+        progressTask = task
+        handler.post(task)
+    }
+
+    private fun renderPlayerState() {
+        val m = model ?: return
+        val player = m.player
+        val title = player.seriesID?.let(m::seriesEntry)?.series?.title ?: "红果 TV"
+        playerTitle.text = "$title  ·  第 ${player.number} 集"
+        playerMessage.text = when (val state = player.state) {
+            PlayerState.Idle -> "播放器已停止"
+            PlayerState.Resolving -> "正在获取播放地址…"
+            PlayerState.ResettingDevice -> "正在刷新播放会话…"
+            PlayerState.Buffering -> "正在缓冲…"
+            PlayerState.Playing -> "播放中"
+            is PlayerState.Failed -> state.message
+        }
+        retryButton.visibility = if (player.state is PlayerState.Failed) View.VISIBLE else View.GONE
+        playButton.text = if (player.video.wantsToPlay && player.video.status != TimeControl.PAUSED) "暂停" else "播放"
+        speedButton.text = "倍速 ${"%.2f".format(player.speed)}×"
+        qualityButton.text = if (player.quality > 0) "${player.quality}P" else "画质"
+    }
+
+    private fun updateProgress() {
+        val player = model?.player ?: return
+        val duration = player.video.duration
+        val position = player.video.position
+        if (duration.isFinite() && duration > 0) {
+            playerSeek.progress = (position / duration * 1000).toInt().coerceIn(0, 1000)
+            progressText.text = "${timeLabel(position)} / ${timeLabel(duration)}"
+        } else {
+            playerSeek.progress = 0
+            progressText.text = "正在读取时长…"
+        }
+        renderPlayerState()
+    }
+
+    private fun openEpisodeDialog() {
+        val m = model ?: return
+        val player = m.player
+        val id = player.seriesID ?: return
+        val page = m.seriesEntry(id)
+        if (page.episodes.isEmpty()) {
+            toast("剧集信息尚未加载")
+            m.loadSeries(page)
+            return
+        }
+        val scroll = ScrollView(this)
+        val grid = GridLayout(this).apply { columnCount = 6; setPadding(dp(8), dp(8), dp(8), dp(8)) }
+        var selected: View? = null
+        page.episodes.forEach { episode ->
+            val cell = navButton(episode.number.toString()) {
+                if (!episode.playable) toast("这一集暂不可播放")
+                else {
+                    m.player.play(id, episode.number)
+                    episodeDialog?.dismiss()
+                }
+            }
+            grid.addView(cell, GridLayout.LayoutParams().apply {
+                width = dp(90); height = dp(48)
+                setMargins(dp(4), dp(4), dp(4), dp(4))
+            })
+            if (episode.number == player.number) selected = cell
+        }
+        scroll.addView(grid)
+        episodeDialog = AlertDialog.Builder(this, android.R.style.Theme_Material_Dialog_Alert)
+            .setTitle("选择剧集")
+            .setView(scroll)
+            .setNegativeButton("返回", null)
+            .create()
+        episodeDialog?.setOnShowListener { selected?.requestFocus() }
+        episodeDialog?.show()
+    }
+
+    private fun chooseNextSpeed() {
+        val player = model?.player ?: return
+        val speeds = com.xiaobei206.hongguotv.model.Player.speeds
+        val index = speeds.indexOf(player.speed).coerceAtLeast(-1)
+        player.chooseSpeed(speeds[(index + 1) % speeds.size])
+        renderPlayerState()
+    }
+
+    private fun chooseNextQuality() {
+        val player = model?.player ?: return
+        if (player.qualities.isEmpty()) { toast("当前剧集没有可切换的清晰度"); return }
+        val index = player.qualities.indexOf(player.quality).coerceAtLeast(-1)
+        player.chooseQuality(player.qualities[(index + 1) % player.qualities.size])
+        renderPlayerState()
+    }
+
+    private fun leavePlayer() {
+        handler.removeCallbacks(hideControls)
+        model?.player?.leave()
+        progressTask?.let(handler::removeCallbacks)
+        screen = parentScreen
+        showShell()
+    }
+
+    private fun buildInfoContent(settings: Boolean) {
+        contentHost.removeAllViews()
+        val column = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(24), dp(18), dp(24), dp(18))
+        }
+        header = text(if (settings) "设置" else "设备兼容性诊断", 27f, Color.WHITE, true)
+        column.addView(header, LinearLayout.LayoutParams(-1, dp(50)))
+        if (!settings) {
+            val report = deviceReport()
+            column.addView(text(report, 16f, 0xffd3dbe5.toInt()), LinearLayout.LayoutParams(-1, 0, 1f))
+            column.addView(navButton("复制诊断信息") {
+                val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                clipboard.setPrimaryClip(ClipData.newPlainText("hongguoTV device report", report))
+                toast("诊断信息已复制")
+            }, LinearLayout.LayoutParams(dp(190), dp(48)))
+        } else {
+            column.addView(text("版本：1.0.0\n最低系统：Android 6.0 / API 23\n播放器：Media3 ExoPlayer\n签名：hongguoTV 独立签名",
+                18f, 0xffd3dbe5.toInt()), LinearLayout.LayoutParams(-1, dp(130)))
+            column.addView(navButton("清理封面缓存") {
+                AlertDialog.Builder(this).setTitle("清理缓存")
+                    .setMessage("删除封面缓存，不会删除收藏和观看历史。")
+                    .setNegativeButton("取消", null)
+                    .setPositiveButton("清理") { _, _ ->
+                        File(cacheDir, "tv-covers").deleteRecursively()
+                        toast("封面缓存已清理")
+                    }.show()
+            }, LinearLayout.LayoutParams(dp(190), dp(48)))
+        }
+        contentHost.addView(column, FrameLayout.LayoutParams(-1, -1))
+    }
+
+    private fun deviceReport(): String {
+        val manager = getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+        val memory = ActivityManager.MemoryInfo()
+        manager.getMemoryInfo(memory)
+        val stat = StatFs(filesDir.absolutePath)
+        val types = listOf("video/avc", "video/hevc", "video/x-vnd.on2.vp9", "video/av01")
+        val codecs = runCatching {
+            MediaCodecList(MediaCodecList.ALL_CODECS).codecInfos
+                .filter { !it.isEncoder }
+                .mapNotNull { info ->
+                    val supported = info.supportedTypes.filter { type -> types.any { it.equals(type, true) } }
+                    if (supported.isEmpty()) null else "${info.name}: ${supported.joinToString()}"
+                }.distinct().take(24).joinToString("\n")
+        }.getOrDefault("无法读取解码器列表")
+        return buildString {
+            appendLine("设备：${Build.MANUFACTURER} ${Build.MODEL}")
+            appendLine("产品：${Build.PRODUCT} / ${Build.DEVICE}")
+            appendLine("Android：${Build.VERSION.RELEASE}（API ${Build.VERSION.SDK_INT}）")
+            appendLine("ABI：${Build.SUPPORTED_ABIS.joinToString()}")
+            appendLine("RAM：系统总量 ${memory.totalMem / 1024 / 1024} MB；应用内存级别 ${manager.memoryClass} MB")
+            appendLine("可用内存：${memory.availMem / 1024 / 1024} MB")
+            appendLine("数据分区可用：${stat.availableBytes / 1024 / 1024} MB")
+            appendLine("屏幕：${resources.displayMetrics.widthPixels}×${resources.displayMetrics.heightPixels}")
+            appendLine()
+            appendLine("视频解码器：")
+            appendLine(codecs)
+            appendLine()
+            appendLine("解码器列表不代表所有编码、分辨率和码率都能稳定播放；最终以实际出画面为准。")
+        }
+    }
+
+    private fun makeSnapshot(): UiSnapshot {
+        val m = model
+        if (m == null) return UiSnapshot(emptyList(), false, tvApp.startupError, null, emptyList(),
+            false, tvApp.startupError, PlayerState.Idle, 0, 1f, 0, emptyList(), 0, 0)
+        val cards = when (screen) {
+            Screen.FAVORITES -> m.favorites.cards
+            Screen.HISTORY -> m.history.list.map {
+                Card(it.seriesID, it.title, it.cover, "第 ${it.episode} 集", episodes = it.total)
+            }
+            else -> currentFeed?.cards.orEmpty()
+        }
+        val page = currentSeries
+        return UiSnapshot(
+            cards, currentFeed?.loading == true, currentFeed?.error?.let(::friendly).orEmpty(),
+            page?.series, page?.episodes.orEmpty(), page?.loading == true, page?.error?.let(::friendly).orEmpty(),
+            m.player.state, m.player.number, m.player.speed, m.player.quality, m.player.qualities,
+            m.favorites.list.size, m.history.list.size,
+        )
+    }
+
+    private fun renderSnapshot(snapshot: UiSnapshot) {
+        if (screen == Screen.PLAYER) {
+            if (renderedScreen != Screen.PLAYER) showPlayer()
+            renderPlayerState()
+            return
+        }
+        if (renderedScreen != screen) {
+            renderedScreen = screen
+            when (screen) {
+                Screen.HOME, Screen.RANK, Screen.NEW, Screen.SEARCH, Screen.FAVORITES, Screen.HISTORY -> buildFeedContent()
+                Screen.DETAIL -> buildDetailContent()
+                Screen.DEVICE -> buildInfoContent(false)
+                Screen.SETTINGS -> buildInfoContent(true)
+                Screen.PLAYER -> return
+            }
+        }
+        shell.visibility = View.VISIBLE
+        playerLayer.visibility = View.GONE
+        when (screen) {
+            Screen.HOME, Screen.RANK, Screen.NEW, Screen.SEARCH, Screen.FAVORITES, Screen.HISTORY -> renderFeed(snapshot)
+            Screen.DETAIL -> renderDetail(snapshot)
+            else -> Unit
+        }
+    }
+
+    private fun showStartupError(message: String) {
+        contentHost.removeAllViews()
+        val label = text("红果 TV 初始化失败\n\n$message\n\n请检查网络后重新启动应用。", 19f, Color.WHITE)
+        label.gravity = Gravity.CENTER
+        contentHost.addView(label, FrameLayout.LayoutParams(-1, -1))
+    }
+
+    @Suppress("DEPRECATION")
+    override fun onBackPressed() {
+        when (screen) {
+            Screen.PLAYER -> leavePlayer()
+            Screen.DETAIL -> { screen = parentScreen; currentSeries = null; showShell() }
+            Screen.SEARCH -> { screen = parentScreen; currentFeed = feedFor(parentScreen); showShell() }
+            Screen.HOME -> super.onBackPressed()
+            else -> enterFeed(Screen.HOME)
+        }
+    }
+
+    private fun feedFor(target: Screen): Feed? = when (target) {
+        Screen.HOME -> model?.home
+        Screen.RANK -> model?.rankFeed
+        Screen.NEW -> model?.newFeed
+        else -> null
+    }
+
+    override fun onStop() {
+        model?.let { it.saveSession(it.session()); it.flush() }
+        super.onStop()
+    }
+
+    override fun onDestroy() {
+        handler.removeCallbacks(hideControls)
+        progressTask?.let(handler::removeCallbacks)
+        if (isFinishing) model?.player?.leave()
+        super.onDestroy()
+    }
+
+    private fun navButton(label: String, action: () -> Unit): TextView =
+        TextView(this).apply {
+            text = label
+            textSize = 16f
+            setTextColor(Color.WHITE)
+            gravity = Gravity.CENTER
+            isFocusable = true
+            isClickable = true
+            setPadding(dp(8), dp(6), dp(8), dp(6))
+            background = buttonBackground(false)
+            setOnClickListener { action() }
+            onFocusChangeListener = View.OnFocusChangeListener { view, focused ->
+                view.background = buttonBackground(focused)
+                view.scaleX = if (focused) 1.035f else 1f
+                view.scaleY = if (focused) 1.035f else 1f
+                view.elevation = if (focused) dp(5).toFloat() else 0f
+            }
+        }
+
+    private fun buttonBackground(focused: Boolean) = GradientDrawable().apply {
+        cornerRadius = dp(8).toFloat()
+        setColor(if (focused) 0xff34465a.toInt() else 0xff1a2635.toInt())
+        setStroke(dp(if (focused) 3 else 1), if (focused) 0xffffb45c.toInt() else 0xff334256.toInt())
+    }
+
+    private fun text(value: String, size: Float, color: Int, bold: Boolean = false) =
+        TextView(this).apply {
+            text = value
+            textSize = size
+            setTextColor(color)
+            if (bold) typeface = Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER_VERTICAL
+        }
+
+    private fun gridColumns(): Int =
+        (resources.displayMetrics.widthPixels / resources.displayMetrics.density / 190).toInt().coerceIn(4, 7)
+
+    private fun dp(value: Int) = (value * resources.displayMetrics.density).toInt()
+
+    private fun timeLabel(seconds: Double): String {
+        if (!seconds.isFinite() || seconds < 0) return "--:--"
+        val total = seconds.toInt()
+        return if (total >= 3600) "%02d:%02d:%02d".format(total / 3600, (total / 60) % 60, total % 60)
+        else "%02d:%02d".format(total / 60, total % 60)
+    }
+
+    private fun toast(message: String) =
+        android.widget.Toast.makeText(this, message, android.widget.Toast.LENGTH_SHORT).show()
+}
