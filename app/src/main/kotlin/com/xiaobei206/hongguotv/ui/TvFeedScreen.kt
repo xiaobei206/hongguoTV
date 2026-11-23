@@ -495,7 +495,7 @@ private fun PosterTile(
                 shape = shape,
             )
             .combinedClickable(
-                onClick = {},
+                onClick = onClick,
                 onLongClick = onLongClick,
             )
             .focusable()
