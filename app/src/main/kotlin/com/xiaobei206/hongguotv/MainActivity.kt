@@ -84,8 +84,6 @@ class MainActivity : ComponentActivity() {
     private val updateManager by lazy { TvUpdateManager(this) }
     private var checkingForUpdate = false
     private var pendingInstallApk: File? = null
-    private var feedPrefillJob: Job? = null
-    private var feedScrollLoadJob: Job? = null
     private var screen by mutableStateOf(Screen.HOME)
     private var parentScreen = Screen.HOME
     private var searchReturnScreen = Screen.HOME
@@ -93,8 +91,6 @@ class MainActivity : ComponentActivity() {
     private var currentSeries: SeriesPage? = null
     private var headerTitle = "推荐"
     private var renderedScreen: Screen? = null
-    private var renderedFilterKey = ""
-    private var feedComposeView: ComposeView? = null
     private var composeFeed by mutableStateOf<Feed?>(null)
     private var composeFeedUi by mutableStateOf<TvFeedUiState?>(null)
 
@@ -104,9 +100,6 @@ class MainActivity : ComponentActivity() {
     private lateinit var playerLayer: FrameLayout
     private lateinit var header: TextView
     private lateinit var subHeader: TextView
-    private lateinit var feedFilterHost: LinearLayout
-    private lateinit var recycler: RecyclerView
-    private lateinit var emptyState: TextView
     private lateinit var playerView: PlayerView
     private lateinit var playerControls: LinearLayout
     private lateinit var playerTitle: TextView
@@ -197,7 +190,7 @@ class MainActivity : ComponentActivity() {
             setPadding(dp(12), dp(18), dp(10), dp(12))
             setBackgroundColor(0xff101925.toInt())
         }
-        rail.addView(text("开心果 · TV", 26f, 0xff72dba0.toInt(), true), LinearLayout.LayoutParams(-1, dp(68)))
+        rail.addView(text("红果 TV", 24f, 0xff72dba0.toInt(), true), LinearLayout.LayoutParams(-1, dp(62)))
         addNav("首页", Screen.HOME)
         addNav("排行榜", Screen.RANK)
         addNav("新剧上线", Screen.NEW)
@@ -208,7 +201,7 @@ class MainActivity : ComponentActivity() {
         addNav("设备信息", Screen.DEVICE)
         addNav("设置", Screen.SETTINGS)
         contentHost = FrameLayout(this).apply { setPadding(dp(14), dp(8), dp(22), dp(12)) }
-        shell.addView(rail, LinearLayout.LayoutParams(dp(190), -1))
+        shell.addView(rail, LinearLayout.LayoutParams(dp(174), -1))
         shell.addView(contentHost, LinearLayout.LayoutParams(0, -1, 1f))
         root.addView(shell, FrameLayout.LayoutParams(-1, -1))
         playerLayer = FrameLayout(this).apply {
@@ -227,12 +220,18 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun navigate(target: Screen) {
-        feedScrollLoadJob?.cancel()
         when (target) {
             Screen.HOME, Screen.RANK, Screen.NEW -> enterFeed(target)
             Screen.FAVORITES, Screen.HISTORY, Screen.DEVICE, Screen.SETTINGS -> {
                 parentScreen = Screen.HOME
                 currentFeed = null
+                headerTitle = when (target) {
+                    Screen.FAVORITES -> "我的收藏"
+                    Screen.HISTORY -> "观看历史"
+                    Screen.DEVICE -> "设备兼容性诊断"
+                    Screen.SETTINGS -> "设置"
+                    else -> headerTitle
+                }
                 screen = target
                 showShell()
             }
@@ -243,8 +242,6 @@ class MainActivity : ComponentActivity() {
 
     private fun enterFeed(target: Screen) {
         val m = model ?: return
-        feedPrefillJob?.cancel()
-        feedPrefillJob = null
         feedScrollLoadJob?.cancel()
         feedScrollLoadJob = null
         parentScreen = target
@@ -264,7 +261,6 @@ class MainActivity : ComponentActivity() {
         screen = target
         currentFeed?.let { if (!it.started || it.stale) it.loadMore() }
         showShell()
-        currentFeed?.let { feed -> scheduleInitialFeedPrefill(target, feed) }
     }
 
     private fun showShell() {
@@ -290,7 +286,6 @@ class MainActivity : ComponentActivity() {
         val view = ComposeView(this).apply {
             setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnViewTreeLifecycleDestroyed)
         }
-        feedComposeView = view
         contentHost.addView(view, FrameLayout.LayoutParams(-1, -1))
         view.setContent {
             val state = composeFeedUi
@@ -310,11 +305,6 @@ class MainActivity : ComponentActivity() {
                 )
             }
         }
-    }
-
-    /** Initial list fill and scroll prefetch are coordinated by TvFeedScreen. */
-    private fun scheduleInitialFeedPrefill(target: Screen, feed: Feed) {
-        // Intentionally centralized in Compose so it can use the actual grid viewport and visible-item state.
     }
 
     private fun renderFeed(snapshot: UiSnapshot) {
@@ -433,153 +423,6 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun renderFeedFilters(snapshot: UiSnapshot) {
-        val m = model ?: run { feedFilterHost.visibility = View.GONE; return }
-        val today = todayKey()
-        val filterKey = when (screen) {
-            Screen.RANK -> buildString {
-                append("rank|").append(snapshot.currentRankContent).append('|').append(snapshot.rankBoard).append('|')
-                snapshot.rankContents.forEach { append(it.id).append(':').append(it.name).append('|') }
-                append("boards|")
-                snapshot.rankBoards.forEach { append(it.id).append(':').append(it.name).append(':').append(it.selected).append('|') }
-            }
-            Screen.NEW -> "new|$today|${snapshot.newDate}|${snapshot.newDates.joinToString("|")}"
-            else -> screen.name
-        }
-        if (filterKey == renderedFilterKey) return
-        val focusedFilterKey = currentFocus?.takeIf { it.tag is String }?.tag as? String
-        renderedFilterKey = filterKey
-        feedFilterHost.removeAllViews()
-        when (screen) {
-            Screen.RANK -> {
-                if (snapshot.rankContents.isNotEmpty()) {
-                    addFilterRow(feedFilterHost, snapshot.rankContents.map { content ->
-                        FilterChoice(
-                            key = "rank-content:${content.id}",
-                            label = content.name.ifBlank { content.id },
-                            selected = snapshot.currentRankContent == content.id,
-                            onClick = {
-                                if (m.rankContent != content.id) {
-                                    m.rankContent = content.id
-                                    m.rankBoard = ""
-                                    enterFeed(Screen.RANK)
-                                }
-                            },
-                        )
-                    })
-                    if (snapshot.rankBoards.isNotEmpty()) {
-                        val choices = ArrayList<FilterChoice>()
-                        choices += FilterChoice(
-                            key = "rank-board:default",
-                            label = "默认",
-                            selected = snapshot.rankBoard.isEmpty() && snapshot.rankBoards.none { it.selected },
-                            onClick = {
-                                if (m.rankBoard.isNotEmpty()) {
-                                    m.rankBoard = ""
-                                    enterFeed(Screen.RANK)
-                                }
-                            },
-                        )
-                        snapshot.rankBoards.forEach { board ->
-                            choices += FilterChoice(
-                                key = "rank-board:${board.id}",
-                                label = board.name.ifBlank { board.id },
-                                selected = board.id == snapshot.rankBoard ||
-                                    (snapshot.rankBoard.isEmpty() && board.selected),
-                                onClick = {
-                                    if (m.rankBoard != board.id) {
-                                        m.rankBoard = board.id
-                                        enterFeed(Screen.RANK)
-                                    }
-                                },
-                            )
-                        }
-                        addFilterRow(feedFilterHost, choices)
-                    }
-                }
-            }
-            Screen.NEW -> {
-                val dates = (listOf(today) + snapshot.newDates).distinct()
-                addFilterRow(feedFilterHost, dates.map { date ->
-                    FilterChoice(
-                        key = "new-date:$date",
-                        label = dayLabel(date, today),
-                        selected = m.dayIsOn(date),
-                        onClick = {
-                            if (!m.dayIsOn(date)) {
-                                m.chooseDay(date)
-                                enterFeed(Screen.NEW)
-                            }
-                        },
-                    )
-                })
-            }
-            else -> Unit
-        }
-        feedFilterHost.visibility = if (feedFilterHost.childCount > 0) View.VISIBLE else View.GONE
-        if (focusedFilterKey != null) {
-            feedFilterHost.post { feedFilterHost.findViewWithTag<View>(focusedFilterKey)?.requestFocus() }
-        }
-    }
-
-    private fun addFilterRow(parent: LinearLayout, choices: List<FilterChoice>) {
-        if (choices.isEmpty()) return
-        val scroll = HorizontalScrollView(this).apply {
-            isHorizontalScrollBarEnabled = false
-            isFocusable = false
-            clipToPadding = false
-        }
-        val row = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-        }
-        val buttons = choices.map { choice ->
-            navButton(choice.label) { choice.onClick() }.apply {
-                tag = choice.key
-                isSelected = choice.selected
-                textSize = 16f
-                minWidth = dp(88)
-            }.also { button ->
-                row.addView(button, LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.WRAP_CONTENT, dp(42),
-                ).apply { rightMargin = dp(8) })
-            }
-        }
-        buttons.forEachIndexed { index, button ->
-            button.nextFocusLeftId = buttons.getOrNull(index - 1)?.id ?: button.id
-            button.nextFocusRightId = buttons.getOrNull(index + 1)?.id ?: button.id
-        }
-        scroll.addView(row, FrameLayout.LayoutParams(
-            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.MATCH_PARENT,
-        ))
-        parent.addView(scroll, LinearLayout.LayoutParams(-1, dp(48)))
-    }
-
-    private fun loadMoreAtEnd(rv: RecyclerView, feed: Feed) {
-        if (feedScrollLoadJob?.isActive == true) return
-        feedScrollLoadJob = lifecycleScope.launch {
-            var emptyBatches = 0
-            while (isActive && screen in setOf(Screen.HOME, Screen.RANK, Screen.NEW, Screen.SEARCH) &&
-                currentFeed === feed && recycler === rv && feed.wantsMore) {
-                val manager = rv.layoutManager as? GridLayoutManager ?: break
-                val lastVisible = manager.findLastVisibleItemPosition()
-                if (manager.itemCount > 0 && lastVisible < manager.itemCount - gridColumns() * 3) break
-                val previousCount = feed.cards.size
-                if (!feed.loading) feed.loadMore()
-                val completed = withTimeoutOrNull(25_000L) {
-                    snapshotFlow { feed.loading }.first { !it }
-                } != null
-                if (!completed || feed.error != null) break
-                if (feed.cards.size > previousCount) break
-                emptyBatches++
-                if (emptyBatches >= 4) {
-                    android.util.Log.w("HongguoTVFeed", "scroll pagination paused after $emptyBatches empty batches; cursor still available")
-                    break
-                }
-            }
-        }
-    }
-
     private fun refreshCurrentFeed() {
         val feed = currentFeed ?: return
         feed.retry()
@@ -619,7 +462,6 @@ class MainActivity : ComponentActivity() {
     private fun doSearch(query: String) {
         val m = model ?: return
         if (screen != Screen.SEARCH) searchReturnScreen = screen
-        feedPrefillJob?.cancel()
         feedScrollLoadJob?.cancel()
         currentFeed = m.searchFeed(query)
         headerTitle = "搜索：$query"
@@ -1389,7 +1231,6 @@ class MainActivity : ComponentActivity() {
                 screen = parentScreen
                 currentSeries = null
                 showShell()
-                currentFeed?.let { feed -> scheduleInitialFeedPrefill(screen, feed) }
             }
             Screen.SEARCH -> {
                 screen = searchReturnScreen
@@ -1529,9 +1370,6 @@ class MainActivity : ComponentActivity() {
             if (bold) typeface = Typeface.DEFAULT_BOLD
             gravity = Gravity.CENTER_VERTICAL
         }
-
-    private fun gridColumns(): Int =
-        (resources.displayMetrics.widthPixels / resources.displayMetrics.density / 190).toInt().coerceIn(4, 7)
 
     private fun dp(value: Int) = (value * resources.displayMetrics.density).toInt()
 
