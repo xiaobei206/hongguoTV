@@ -114,7 +114,7 @@ internal fun TvFeedScreen(
             .padding(start = 22.dp, end = 24.dp, top = 14.dp, bottom = 14.dp),
     ) {
         val columns = (maxWidth / 166.dp).toInt().coerceIn(3, 7)
-        val initialTarget = max(20, columns * 3)
+        val initialTarget = max(30, columns * 4)
 
         LaunchedEffect(feed, state.feedKey, columns) {
             val source = feed ?: return@LaunchedEffect
@@ -152,6 +152,10 @@ internal fun TvFeedScreen(
                     source.loadMore()
                 }
             }
+        }
+
+        LaunchedEffect(state.screenKey, state.feedKey) {
+            runCatching { gridState.scrollToItem(0) }
         }
 
         LaunchedEffect(
