@@ -24,6 +24,8 @@ class TvApplication : Application() {
     private lateinit var appScope: CoroutineScope
     var startupError: String = ""
         private set
+    var handoffServer: TvHandoffServer? = null
+        private set
 
     override fun onCreate() {
         super.onCreate()
@@ -33,7 +35,7 @@ class TvApplication : Application() {
             .setConnectTimeoutMs(15_000)
             .setReadTimeoutMs(20_000)
             .setAllowCrossProtocolRedirects(true)
-            .setUserAgent("hongguoTV/1.0.0 AndroidTV")
+            .setUserAgent("hongguoTV/${BuildConfig.VERSION_NAME} AndroidTV")
         val streams = StreamRegistry(http)
         video = ExoVideo(this, streams, http)
         appScope = MainScope()
@@ -50,6 +52,7 @@ class TvApplication : Application() {
             model = AppModel(SdkCatalog(client), filesDir, cacheDir, appScope, video, streams).also {
                 it.artwork = artwork::cachedJpeg
             }
+            handoffServer = TvHandoffServer(this).also { it.start() }
         } catch (e: Exception) {
             startupError = e.message ?: e.javaClass.simpleName
             Log.e("hongguoTV", "SDK 初始化失败", e)
@@ -57,6 +60,7 @@ class TvApplication : Application() {
     }
 
     override fun onTerminate() {
+        handoffServer?.stop()
         model?.flush()
         if (::video.isInitialized) video.exo.release()
         super.onTerminate()

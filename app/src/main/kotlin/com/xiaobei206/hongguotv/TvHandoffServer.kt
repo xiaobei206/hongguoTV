@@ -68,6 +68,8 @@ class TvHandoffServer(context: Context) {
     @Volatile private var serverSocket: ServerSocket? = null
     @Volatile private var serverPort = 0
     @Volatile private var registrationListener: NsdManager.RegistrationListener? = null
+    @Volatile private var registrationInProgress = false
+    @Volatile private var unregistering = false
 
     fun start() {
         if (!started.compareAndSet(false, true)) return
@@ -107,8 +109,8 @@ class TvHandoffServer(context: Context) {
         prefs.edit().putString("display_name", clean).apply()
         executor.execute {
             if (available) {
-                unregisterService()
-                if (registrationListener == null) registerService()
+                if (registrationListener == null && !registrationInProgress && !unregistering) registerService()
+                else unregisterService()
             }
         }
         return true
@@ -124,7 +126,8 @@ class TvHandoffServer(context: Context) {
     }
 
     private fun registerService() {
-        if (!available || serverPort <= 0 || registrationListener != null) return
+        if (!available || serverPort <= 0 || registrationListener != null || registrationInProgress || unregistering) return
+        registrationInProgress = true
         val manufacturer = Build.MANUFACTURER.orEmpty().take(64)
         val model = Build.MODEL.orEmpty().take(64)
         val service = NsdServiceInfo().apply {
@@ -142,21 +145,27 @@ class TvHandoffServer(context: Context) {
         val registration = object : NsdManager.RegistrationListener {
             override fun onRegistrationFailed(serviceInfo: NsdServiceInfo, errorCode: Int) {
                 registrationListener = null
+                registrationInProgress = false
                 Log.w(TAG, "NSD registration failed: $errorCode")
             }
 
             override fun onServiceRegistered(serviceInfo: NsdServiceInfo) {
+                registrationInProgress = false
                 Log.i(TAG, "Advertising ${serviceInfo.serviceName} as $displayName")
             }
 
             override fun onServiceUnregistered(serviceInfo: NsdServiceInfo) {
                 registrationListener = null
+                registrationInProgress = false
+                unregistering = false
                 if (available) registerService()
             }
 
             override fun onUnregistrationFailed(serviceInfo: NsdServiceInfo, errorCode: Int) {
                 Log.w(TAG, "NSD unregistration failed: $errorCode")
                 registrationListener = null
+                registrationInProgress = false
+                unregistering = false
             }
         }
         registrationListener = registration
@@ -171,8 +180,12 @@ class TvHandoffServer(context: Context) {
     private fun unregisterService() {
         val current = registrationListener ?: return
         registrationListener = null
+        unregistering = true
         runCatching { nsd.unregisterService(current) }
-            .onFailure { Log.w(TAG, "Unable to unregister NSD service", it) }
+            .onFailure {
+                unregistering = false
+                Log.w(TAG, "Unable to unregister NSD service", it)
+            }
     }
 
     private fun handleClient(socket: Socket) {
@@ -200,17 +213,17 @@ class TvHandoffServer(context: Context) {
 
                 val latch = CountDownLatch(1)
                 val completed = AtomicBoolean(false)
-                @Volatile var result: TvHandoffReply? = null
+                val result = java.util.concurrent.atomic.AtomicReference<TvHandoffReply?>(null)
                 val callback: (TvHandoffReply) -> Unit = { reply ->
                     if (completed.compareAndSet(false, true)) {
-                        result = reply
+                        result.set(reply)
                         latch.countDown()
                     }
                 }
                 receiver.invoke(request, callback)
                 val finished = latch.await(37, TimeUnit.SECONDS)
                 val response = if (finished) {
-                    result ?: TvHandoffReply(request.transferId, false, "电视没有完成播放确认", deviceId)
+                    result.get() ?: TvHandoffReply(request.transferId, false, "电视没有完成播放确认", deviceId)
                 } else {
                     TvHandoffReply(request.transferId, false, "电视启动播放超时，请检查网络或重试", deviceId)
                 }

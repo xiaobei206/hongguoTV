@@ -52,6 +52,8 @@ import com.xiaobei206.hongguotv.model.metaLine
 import dev.openhongguo.Episode
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
 
 @androidx.media3.common.util.UnstableApi
@@ -671,8 +673,33 @@ class MainActivity : ComponentActivity() {
                 toast("诊断信息已复制")
             }, LinearLayout.LayoutParams(dp(190), dp(48)))
         } else {
-            column.addView(text("版本：1.0.0\n最低系统：Android 6.0 / API 23\n播放器：Media3 ExoPlayer\n签名：hongguoTV 独立签名",
-                18f, 0xffd3dbe5.toInt()), LinearLayout.LayoutParams(-1, dp(130)))
+            val identity = tvApp.handoffServer
+            val handoffLine = identity?.let { "\n接力名称：${it.displayName}\n设备编号：${it.shortCode}" }.orEmpty()
+            column.addView(text("版本：${BuildConfig.VERSION_NAME}\n最低系统：Android 6.0 / API 23\n播放器：Media3 ExoPlayer\n签名：hongguoTV 独立签名$handoffLine",
+                18f, 0xffd3dbe5.toInt()), LinearLayout.LayoutParams(-1, dp(190)))
+            if (identity != null) {
+                column.addView(navButton("修改电视显示名称") {
+                    val input = EditText(this).apply {
+                        setSingleLine(true)
+                        setText(identity.displayName)
+                        setSelection(text.length)
+                    }
+                    AlertDialog.Builder(this)
+                        .setTitle("电视显示名称")
+                        .setMessage("这个名称会显示在开心果的电视搜索列表中。")
+                        .setView(input)
+                        .setNegativeButton("取消", null)
+                        .setPositiveButton("保存") { _, _ ->
+                            if (identity.setDisplayName(input.text.toString())) {
+                                toast("电视名称已更新")
+                                buildInfoContent(true)
+                            } else {
+                                toast("名称不能为空")
+                            }
+                        }
+                        .show()
+                }, LinearLayout.LayoutParams(dp(220), dp(48)))
+            }
             column.addView(navButton("清理封面缓存") {
                 AlertDialog.Builder(this).setTitle("清理缓存")
                     .setMessage("删除封面缓存，不会删除收藏和观看历史。")
@@ -789,13 +816,59 @@ class MainActivity : ComponentActivity() {
 
     override fun onStart() {
         super.onStart()
+        tvApp.handoffServer?.let { server ->
+            server.listener = ::handleHandoffRequest
+            server.setAvailable(true)
+        }
         model?.player?.returnToApp()
     }
 
     override fun onStop() {
+        tvApp.handoffServer?.let { server ->
+            server.listener = null
+            server.setAvailable(false)
+        }
         model?.player?.leaveApp()
         model?.let { it.saveSession(it.session()); it.flush() }
         super.onStop()
+    }
+
+    private fun handleHandoffRequest(request: TvHandoffRequest, reply: (TvHandoffReply) -> Unit) {
+        runOnUiThread {
+            val m = model
+            if (m == null) {
+                reply(TvHandoffReply(request.transferId, false, "电视播放器尚未初始化", tvApp.handoffServer?.deviceId.orEmpty()))
+                return@runOnUiThread
+            }
+            parentScreen = Screen.HOME
+            screen = Screen.PLAYER
+            m.player.play(request.seriesId, request.episode, request.positionMs / 1000.0)
+            showPlayer()
+            lifecycleScope.launch {
+                val state = withTimeoutOrNull(34_000L) {
+                    snapshotFlow { m.player.state }.first {
+                        it == PlayerState.Playing || it is PlayerState.Failed
+                    }
+                }
+                val current = m.player.seriesID == request.seriesId && m.player.number == request.episode
+                val server = tvApp.handoffServer
+                val response = when {
+                    !current -> TvHandoffReply(request.transferId, false, "电视播放任务已被其他操作替代", server?.deviceId.orEmpty())
+                    state == PlayerState.Playing -> TvHandoffReply(request.transferId, true, "电视已开始播放", server?.deviceId.orEmpty())
+                    state is PlayerState.Failed -> {
+                        m.player.leave()
+                        TvHandoffReply(request.transferId, false, state.message, server?.deviceId.orEmpty())
+                    }
+                    else -> {
+                        m.player.leave()
+                        TvHandoffReply(request.transferId, false, "电视加载视频超时", server?.deviceId.orEmpty())
+                    }
+                }
+                reply(response)
+                if (response.accepted) toast("已接收手机接力播放")
+                else toast("接力播放失败：${response.message}")
+            }
+        }
     }
 
     override fun onDestroy() {
