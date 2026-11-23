@@ -76,60 +76,66 @@ class Feed(
         return added
     }
 
+    /**
+     * Applies metadata fetched after a page was already displayed. Existing card
+     * order, title, chart rank and non-empty fields remain authoritative.
+     */
+    internal fun updateCards(updates: List<Card>): Int {
+        if (updates.isEmpty() || cards.isEmpty()) return 0
+        val byId = updates.associateBy { it.id }
+        var changed = 0
+        val updated = cards.map { current ->
+            val richer = byId[current.id] ?: return@map current
+            val merged = current.copy(
+                cover = current.cover.ifBlank { richer.cover },
+                sub = current.sub.ifBlank { richer.sub },
+                rank = if (current.rank > 0) current.rank else richer.rank,
+                episodes = if (current.episodes > 0) current.episodes else richer.episodes,
+            )
+            if (merged != current) changed++
+            merged
+        }
+        if (changed > 0) cards = updated
+        return changed
+    }
+
     /** Whether the grid should ask for the next page. */
     val wantsMore: Boolean get() = fetch != null && (stale || more || !started)
 
     /**
-     * Fetches a useful batch of new cards. Empty pages, duplicate pages and pages
-     * whose cards were filtered elsewhere do not end a batch while the cursor moves.
-     * The no-argument overload keeps existing callers source-compatible.
+     * Loads exactly one upstream page. The caller decides whether another page
+     * should be requested, so the first useful response can reach the UI at once.
+     * The parameter overload remains source-compatible with older callers.
      */
-    fun loadMore() = loadMore(DEFAULT_BATCH_TARGET)
+    fun loadMore() = loadPage()
 
-    fun loadMore(minAdditionalCards: Int) {
+    fun loadMore(@Suppress("UNUSED_PARAMETER") minAdditionalCards: Int) = loadPage()
+
+    private fun loadPage() {
         val fetch = fetch ?: return
         if (loading || (started && !stale && !more)) return
         if (error != null && System.nanoTime() - errorAt < 5_000_000_000L) return
-        val target = minAdditionalCards.coerceIn(1, MAX_BATCH_TARGET)
         loading = true
         started = true
-        var requestCursor = if (stale) "" else this.cursor
+        val requested = if (stale) "" else cursor
         scope.launch {
-            var fetchedPages = 0
-            var batchAdded = 0
             try {
-                while (fetchedPages < MAX_PAGES_PER_BATCH && batchAdded < target) {
-                    val requested = requestCursor
-                    val page = fetch(requested)
-                    val added = add(page, requestCursor = requested)
-                    batchAdded += added
-                    fetchedPages++
-                    onPage?.invoke(page)
-                    val cursorAdvanced = page.cursor.isNotBlank() && page.cursor != requested
-                    debugLog {
-                        "feed page requestCursorLength=${requested.length} responseCursorLength=${page.cursor.length} " +
-                            "cursorAdvanced=$cursorAdvanced rawCards=${page.cards.size} added=$added " +
-                            "batchAdded=$batchAdded target=$target total=${cards.size} hasMore=${page.more} batchPage=$fetchedPages"
-                    }
-                    // Continue across sparse pages until enough *new* cards arrive,
-                    // the API says there is no more, or the cursor stops moving.
-                    if (!more || !cursorAdvanced || batchAdded >= target) break
-                    requestCursor = page.cursor
-                }
-                debugLog {
-                    "feed batch finished fetchedPages=$fetchedPages batchAdded=$batchAdded target=$target " +
-                        "total=${cards.size} hasMore=$more"
-                }
+                val page = fetch(requested)
+                val added = add(page, requestCursor = requested)
                 error = null
                 tries = 0
+                onPage?.invoke(page)
+                debugLog {
+                    "feed page requestCursorLength=${requested.length} responseCursorLength=${page.cursor.length} " +
+                        "cursorAdvanced=${page.cursor.isNotBlank() && page.cursor != requested} " +
+                        "rawCards=${page.cards.size} added=$added total=${cards.size} hasMore=${more}"
+                }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
                 error = e
                 errorAt = System.nanoTime()
-                debugLog {
-                    "feed batch failed after $fetchedPages page(s), added=$batchAdded target=$target: $e"
-                }
+                debugLog { "feed page failed requestCursorLength=${requested.length}: $e" }
                 scheduleRetry()
             } finally {
                 loading = false
@@ -205,13 +211,6 @@ class Feed(
     }
 
     companion object {
-        /** Default useful additions per batch; callers may request the remaining count. */
-        private const val DEFAULT_BATCH_TARGET = 20
-        private const val MAX_BATCH_TARGET = 60
-
-        /** Bounds the amount of work a single load operation can perform. */
-        private const val MAX_PAGES_PER_BATCH = 8
-
         /** A feed of these cards alone, with nothing to fetch. */
         fun of(scope: CoroutineScope, cards: List<Card>): Feed = Feed(scope, null).apply {
             add(FeedPage(cards))

@@ -66,7 +66,6 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
-import kotlin.math.ceil
 
 @androidx.media3.common.util.UnstableApi
 class MainActivity : ComponentActivity() {
@@ -403,25 +402,22 @@ class MainActivity : ComponentActivity() {
     }
 
     /**
-     * Ranking and new-release APIs return a page at a time. Populate roughly two
-     * viewport-heights before asking the viewer to scroll, then let onScrolled
-     * keep a three-row buffer ahead during downward navigation. Empty cursor-advancing
-     * batches are retried while the viewer remains near the end of the grid.
+     * Fetch one upstream page at a time and let RecyclerView render it immediately.
+     * Continue in the background until the list has 100 cards; scrolling still
+     * requests the next page early so browsing never waits for the whole prefill.
      */
     private fun scheduleInitialFeedPrefill(target: Screen, feed: Feed) {
-        if (target != Screen.HOME && target != Screen.RANK && target != Screen.NEW) return
+        if (target !in setOf(Screen.HOME, Screen.RANK, Screen.NEW, Screen.SEARCH)) return
         feedPrefillJob?.cancel()
         feedScrollLoadJob?.cancel()
         recycler.post {
             if (screen != target || currentFeed !== feed) return@post
-            val rowExtent = dp(318).coerceAtLeast(1)
-            val visibleRows = ceil(recycler.height.toDouble() / rowExtent).toInt().coerceAtLeast(2)
-            val minimumItems = (gridColumns() * visibleRows * 2).coerceIn(24, 48)
+            val minimumItems = INITIAL_FEED_PREFETCH_TARGET
             feedPrefillJob = lifecycleScope.launch {
                 var batches = 0
                 var stalledBatches = 0
                 while (isActive && screen == target && currentFeed === feed &&
-                    feed.cards.size < minimumItems && feed.wantsMore && batches < 12) {
+                    feed.cards.size < minimumItems && feed.wantsMore && batches < MAX_INITIAL_FEED_PREFETCH_PAGES) {
                     val previousCount = feed.cards.size
                     if (!feed.loading) feed.loadMore()
                     val completed = withTimeoutOrNull(25_000L) {
@@ -672,6 +668,7 @@ class MainActivity : ComponentActivity() {
         screen = Screen.SEARCH
         currentFeed?.loadMore()
         showShell()
+        currentFeed?.let { feed -> scheduleInitialFeedPrefill(Screen.SEARCH, feed) }
     }
 
     private fun onCardSelected(card: Card) {
@@ -1603,5 +1600,7 @@ class MainActivity : ComponentActivity() {
 
     companion object {
         private const val REQUEST_INSTALL_PERMISSION = 7314
+        private const val INITIAL_FEED_PREFETCH_TARGET = 100
+        private const val MAX_INITIAL_FEED_PREFETCH_PAGES = 20
     }
 }

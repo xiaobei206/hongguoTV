@@ -255,7 +255,44 @@ class AppModel(
     fun searchFeed(query: String): Feed {
         val q = query.trim()
         return feed("search:$q") {
-            Feed(scope) { cursor -> search(catalog, q, cursor) }.apply { order = ::orderSeasons }
+            val result = Feed(scope) { cursor -> search(catalog, q, cursor) }
+            result.order = ::orderSeasons
+
+            // A search page often has IDs and titles before it has poster URLs.
+            // Do not hold the page back for these extra detail requests: show it
+            // first, then enrich missing artwork in a single background queue.
+            val pendingCoverIds = LinkedHashSet<String>()
+            val queuedCoverIds = HashSet<String>()
+            var coverJob: Job? = null
+
+            result.onPage = { page ->
+                saveCatalogCache("search:$q", result.cards)
+                page.cards.forEach { card ->
+                    if (card.cover.isBlank() && queuedCoverIds.add(card.id)) pendingCoverIds.add(card.id)
+                }
+                if (pendingCoverIds.isNotEmpty() && coverJob?.isActive != true) {
+                    coverJob = scope.launch {
+                        while (pendingCoverIds.isNotEmpty()) {
+                            val ids = pendingCoverIds.take(30)
+                            pendingCoverIds.removeAll(ids.toSet())
+                            val details = attempt { catalog.getSeriesBatch(ids) }.getOrNull()
+                            if (details == null) {
+                                debugLog { "search artwork enrichment failed queryLength=${q.length} ids=${ids.size}" }
+                                continue
+                            }
+                            val enriched = details.mapNotNull { it.series?.let(Card::of) }
+                            val updated = result.updateCards(enriched)
+                            if (updated > 0) saveCatalogCache("search:$q", result.cards)
+                            debugLog {
+                                "search artwork enrichment queryLength=${q.length} requested=${ids.size} " +
+                                    "returned=${enriched.size} updated=$updated"
+                            }
+                        }
+                    }
+                }
+            }
+            restoreCatalogCache("search:$q", result)
+            result
         }
     }
 
@@ -307,7 +344,7 @@ class AppModel(
     internal fun writeHomeCache(cards: List<Card>) {
         try {
             val a = JSONArray()
-            cards.take(48).forEach { a.put(it.toJson()) }
+            cards.take(100).forEach { a.put(it.toJson()) }
             cacheDir.mkdirs()
             val tmp = File(cacheDir, "home.json.tmp")
             tmp.writeText(a.toString())
@@ -318,7 +355,7 @@ class AppModel(
     }
 
     private fun saveHomeCache(cards: List<Card>) {
-        val snapshot = cards.take(48)
+        val snapshot = cards.take(100)
         scope.launch(Dispatchers.IO) { writeHomeCache(snapshot) }
     }
 
@@ -346,7 +383,7 @@ class AppModel(
     }
 
     private fun saveCatalogCache(key: String, cards: List<Card>) {
-        val snapshot = cards.take(48)
+        val snapshot = cards.take(100)
         scope.launch(Dispatchers.IO) {
             try {
                 val array = JSONArray()
@@ -560,15 +597,11 @@ class AppModel(
          * its end.
          */
         internal fun discover(catalog: Catalog): suspend (String) -> FeedPage = { cursor ->
-            val out = FeedPage(cursor = cursor)
-            for (i in 0 until 3) { // past pages that bring nothing
-                val p = catalog.discover(DiscoverOptions(cursor = out.cursor))
-                out.cards = out.cards + p.items.map(Card::of)
-                out.cursor = p.cursor
-                out.more = p.hasMore
-                if (out.cards.isNotEmpty() || !p.hasMore) break
-            }
-            out
+            // Never hide cursor-advancing empty pages inside one fetch. The feed
+            // scheduler can move past them while rendering each useful page as soon
+            // as its own response arrives.
+            val page = catalog.discover(DiscoverOptions(cursor = cursor))
+            FeedPage(page.items.map(Card::of), page.cursor, page.hasMore)
         }
 
         internal suspend fun search(catalog: Catalog, q: String, cursor: String): FeedPage {
@@ -583,25 +616,9 @@ class AppModel(
                     throw e2
                 }
             }
-            val out = FeedPage(r.items.map(Card::of), r.cursor, r.hasMore && r.items.isNotEmpty())
-            // Search results come without covers: read them from the details.
-            val missing = r.items.filter { it.coverUrl.isEmpty() }.map { it.id }
-            if (missing.isNotEmpty()) {
-                val details = attempt { catalog.getSeriesBatch(missing) }.getOrNull()
-                if (details != null) {
-                    val byID = HashMap<String, Series>()
-                    for (d in details) d.series?.let { byID[it.id] = it }
-                    out.cards = out.cards.map { k ->
-                        val s = byID[k.id] ?: return@map k
-                        if (s.episodeCount > 0) {
-                            k.copy(cover = s.coverUrl, sub = episodesLabel(s), episodes = s.episodeCount)
-                        } else {
-                            k.copy(cover = s.coverUrl)
-                        }
-                    }
-                }
-            }
-            return out
+            // Return the result page immediately; missing poster URLs are
+            // enriched asynchronously by searchFeed after this page is visible.
+            return FeedPage(r.items.map(Card::of), r.cursor, r.hasMore)
         }
     }
 }
