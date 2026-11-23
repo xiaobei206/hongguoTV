@@ -185,25 +185,59 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun buildShell() {
-        val root = FrameLayout(this).apply { setBackgroundColor(0xff0b1018.toInt()) }
+        val root = FrameLayout(this).apply { setBackgroundColor(0xff080d14.toInt()) }
         shell = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         rail = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(12), dp(18), dp(10), dp(12))
-            setBackgroundColor(0xff101925.toInt())
+            setPadding(dp(10), dp(18), dp(10), dp(14))
+            background = GradientDrawable(
+                GradientDrawable.Orientation.LEFT_RIGHT,
+                intArrayOf(0xff111c2a.toInt(), 0xff0d141e.toInt()),
+            )
         }
-        rail.addView(text("开心果 · TV", 26f, 0xff72dba0.toInt(), true), LinearLayout.LayoutParams(-1, dp(68)))
-        addNav("首页", Screen.HOME)
+
+        val brand = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(14), dp(10), dp(10), dp(10))
+            background = GradientDrawable(
+                GradientDrawable.Orientation.TL_BR,
+                intArrayOf(0xff193c31.toInt(), 0xff172538.toInt()),
+            ).apply { cornerRadius = dp(14).toFloat() }
+            addView(text("红果 TV", 24f, 0xfff4fff9.toInt(), true),
+                LinearLayout.LayoutParams(-1, dp(34)))
+            addView(text("短剧 · 大屏精选", 12f, 0xffa4c9b8.toInt()),
+                LinearLayout.LayoutParams(-1, dp(22)))
+        }
+        rail.addView(brand, LinearLayout.LayoutParams(-1, dp(76)).apply {
+            leftMargin = dp(4); rightMargin = dp(4); bottomMargin = dp(18)
+        })
+        rail.addView(text("内容发现", 12f, 0xff7f91a7.toInt(), true),
+            LinearLayout.LayoutParams(-1, dp(27)).apply { leftMargin = dp(12) })
+        addNav("推荐", Screen.HOME)
         addNav("排行榜", Screen.RANK)
         addNav("新剧上线", Screen.NEW)
-        addNav("搜索", Screen.SEARCH) { openSearchDialog() }
+        addNav("搜索剧集", Screen.SEARCH) { openSearchDialog() }
+        rail.addView(View(this), LinearLayout.LayoutParams(1, 0, 1f))
+        rail.addView(View(this).apply { setBackgroundColor(0xff273649.toInt()) },
+            LinearLayout.LayoutParams(-1, dp(1)).apply {
+                leftMargin = dp(9); rightMargin = dp(9); topMargin = dp(10); bottomMargin = dp(12)
+            })
+        rail.addView(text("个人空间", 12f, 0xff7f91a7.toInt(), true),
+            LinearLayout.LayoutParams(-1, dp(27)).apply { leftMargin = dp(12) })
         addNav("我的收藏", Screen.FAVORITES)
         addNav("观看历史", Screen.HISTORY)
-        rail.addView(View(this), LinearLayout.LayoutParams(1, 0, 1f))
-        addNav("设备信息", Screen.DEVICE)
+        addNav("设备诊断", Screen.DEVICE)
         addNav("设置", Screen.SETTINGS)
-        contentHost = FrameLayout(this).apply { setPadding(dp(14), dp(8), dp(22), dp(12)) }
-        shell.addView(rail, LinearLayout.LayoutParams(dp(190), -1))
+        rail.addView(text("TV  ·  " + BuildConfig.VERSION_NAME, 10f, 0xff64758a.toInt()),
+            LinearLayout.LayoutParams(-1, dp(26)).apply {
+                leftMargin = dp(12); topMargin = dp(8)
+            })
+
+        contentHost = FrameLayout(this).apply {
+            setPadding(dp(18), dp(12), dp(24), dp(14))
+        }
+        shell.addView(rail, LinearLayout.LayoutParams(dp(196), -1))
         shell.addView(contentHost, LinearLayout.LayoutParams(0, -1, 1f))
         root.addView(shell, FrameLayout.LayoutParams(-1, -1))
         playerLayer = FrameLayout(this).apply {
@@ -216,9 +250,15 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun addNav(label: String, target: Screen, action: (() -> Unit)? = null) {
-        val button = navButton(label) { if (action != null) action() else navigate(target) }
-        button.tag = target
-        rail.addView(button, LinearLayout.LayoutParams(-1, dp(56)))
+        val button = navButton(label) { if (action != null) action() else navigate(target) }.apply {
+            tag = target
+            gravity = Gravity.CENTER_VERTICAL
+            textSize = 16.5f
+            setPadding(dp(15), dp(6), dp(8), dp(6))
+        }
+        rail.addView(button, LinearLayout.LayoutParams(-1, dp(47)).apply {
+            topMargin = dp(3); bottomMargin = dp(3); leftMargin = dp(3); rightMargin = dp(3)
+        })
     }
 
     private fun navigate(target: Screen) {
@@ -282,16 +322,43 @@ class MainActivity : ComponentActivity() {
 
     private fun buildFeedContent() {
         contentHost.removeAllViews()
-        val column = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        val top = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
-        header = text(headerTitle, 27f, Color.WHITE, true)
-        top.addView(header, LinearLayout.LayoutParams(0, dp(52), 1f))
-        top.addView(navButton("搜索") { openSearchDialog() }, LinearLayout.LayoutParams(dp(90), dp(42)))
-        top.addView(navButton("刷新") { refreshCurrentFeed() }, LinearLayout.LayoutParams(dp(90), dp(42)))
-        column.addView(top)
-        subHeader = text("方向键移动 · 确认打开 · 长按收藏", 16f, 0xffa7b2c2.toInt())
-        column.addView(subHeader, LinearLayout.LayoutParams(-1, dp(30)))
-        feedFilterHost = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; visibility = View.GONE }
+        val column = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            clipChildren = false
+        }
+        val top = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        val heading = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        heading.addView(text("HONGGUO  /  TV", 11f, 0xff6bd6a3.toInt(), true),
+            LinearLayout.LayoutParams(-1, dp(20)))
+        header = text(headerTitle, 30f, 0xfff4f7fb.toInt(), true)
+        heading.addView(header, LinearLayout.LayoutParams(-1, dp(42)))
+        top.addView(heading, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        top.addView(navButton("搜索") { openSearchDialog() }.apply {
+            textSize = 15f
+            setTextColor(0xffe7edf5.toInt())
+        }, LinearLayout.LayoutParams(dp(84), dp(42)).apply { leftMargin = dp(8) })
+        top.addView(navButton("刷新") { refreshCurrentFeed() }.apply {
+            textSize = 15f
+            setTextColor(0xffe7edf5.toInt())
+        }, LinearLayout.LayoutParams(dp(84), dp(42)).apply { leftMargin = dp(8) })
+        column.addView(top, LinearLayout.LayoutParams(-1, dp(66)))
+
+        subHeader = text("正在为你寻找值得追的短剧…", 13f, 0xff91a2b6.toInt())
+        subHeader.setPadding(dp(2), dp(2), dp(2), dp(4))
+        column.addView(subHeader, LinearLayout.LayoutParams(-1, dp(28)).apply {
+            bottomMargin = dp(4)
+        })
+        feedFilterHost = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            visibility = View.GONE
+            clipChildren = false
+        }
         renderedFilterKey = ""
         column.addView(feedFilterHost, LinearLayout.LayoutParams(-1, ViewGroup.LayoutParams.WRAP_CONTENT))
         recycler = RecyclerView(this).apply {
@@ -299,11 +366,12 @@ class MainActivity : ComponentActivity() {
             layoutManager = GridLayoutManager(this@MainActivity, gridColumns())
             adapter = cardAdapter
             setHasFixedSize(true)
-            setItemViewCacheSize(3)
+            setItemViewCacheSize(6)
             itemAnimator = null
             overScrollMode = View.OVER_SCROLL_NEVER
-            setPadding(dp(2), dp(4), dp(2), dp(10))
+            setPadding(dp(2), dp(10), dp(4), dp(18))
             clipToPadding = false
+            clipChildren = false
             addOnScrollListener(object : RecyclerView.OnScrollListener() {
                 override fun onScrolled(rv: RecyclerView, dx: Int, dy: Int) {
                     val manager = rv.layoutManager as? GridLayoutManager ?: return
@@ -318,7 +386,10 @@ class MainActivity : ComponentActivity() {
         }
         val frame = FrameLayout(this)
         frame.addView(recycler, FrameLayout.LayoutParams(-1, -1))
-        emptyState = text("正在连接红果…", 18f, 0xffa7b2c2.toInt()).apply { gravity = Gravity.CENTER }
+        emptyState = text("正在为你寻找值得追的短剧…", 18f, 0xffb5c3d3.toInt()).apply {
+            gravity = Gravity.CENTER
+            setPadding(dp(24), dp(16), dp(24), dp(16))
+        }
         frame.addView(emptyState, FrameLayout.LayoutParams(-1, -1))
         column.addView(frame, LinearLayout.LayoutParams(-1, 0, 1f))
         contentHost.addView(column, FrameLayout.LayoutParams(-1, -1))
@@ -326,11 +397,10 @@ class MainActivity : ComponentActivity() {
             if (cardAdapter.itemCount > 0) {
                 recycler.findViewHolderForAdapterPosition(0)?.itemView?.requestFocus()
             } else {
-                rail.getChildAt(1)?.requestFocus()
+                rail.getChildAt(2)?.requestFocus()
             }
         }
     }
-
 
     /**
      * Ranking and new-release APIs return a page at a time. Populate roughly two
@@ -339,14 +409,14 @@ class MainActivity : ComponentActivity() {
      * batches are retried while the viewer remains near the end of the grid.
      */
     private fun scheduleInitialFeedPrefill(target: Screen, feed: Feed) {
-        if (target != Screen.RANK && target != Screen.NEW) return
+        if (target != Screen.HOME && target != Screen.RANK && target != Screen.NEW) return
         feedPrefillJob?.cancel()
         feedScrollLoadJob?.cancel()
         recycler.post {
             if (screen != target || currentFeed !== feed) return@post
-            val rowExtent = dp(282).coerceAtLeast(1)
+            val rowExtent = dp(318).coerceAtLeast(1)
             val visibleRows = ceil(recycler.height.toDouble() / rowExtent).toInt().coerceAtLeast(2)
-            val minimumItems = gridColumns() * visibleRows * 2
+            val minimumItems = (gridColumns() * visibleRows * 2).coerceIn(24, 48)
             feedPrefillJob = lifecycleScope.launch {
                 var batches = 0
                 var stalledBatches = 0
@@ -510,8 +580,11 @@ class MainActivity : ComponentActivity() {
             navButton(choice.label) { choice.onClick() }.apply {
                 tag = choice.key
                 isSelected = choice.selected
-                textSize = 16f
-                minWidth = dp(88)
+                background = buttonBackground(false, choice.selected)
+                setTextColor(if (choice.selected) 0xff9af0c0.toInt() else Color.WHITE)
+                textSize = 15f
+                minWidth = dp(84)
+                setPadding(dp(12), dp(6), dp(12), dp(6))
             }.also { button ->
                 row.addView(button, LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.WRAP_CONTENT, dp(42),
@@ -1503,8 +1576,18 @@ class MainActivity : ComponentActivity() {
             gravity = Gravity.CENTER_VERTICAL
         }
 
-    private fun gridColumns(): Int =
-        (resources.displayMetrics.widthPixels / resources.displayMetrics.density / 190).toInt().coerceIn(4, 7)
+    private fun gridColumns(): Int {
+        val density = resources.displayMetrics.density.coerceAtLeast(1f)
+        val screenWidthDp = resources.displayMetrics.widthPixels / density
+        val availableDp = if (::contentHost.isInitialized && contentHost.width > 0) {
+            contentHost.width / density - 36f
+        } else {
+            screenWidthDp - 196f - 36f
+        }
+        // Count columns from the actual grid area, not the whole TV width;
+        // otherwise the sidebar is counted as poster space and cards become tiny.
+        return (availableDp / 178f).toInt().coerceIn(3, 6)
+    }
 
     private fun dp(value: Int) = (value * resources.displayMetrics.density).toInt()
 

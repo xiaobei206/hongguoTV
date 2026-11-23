@@ -52,7 +52,7 @@ class TvArtworkLoader(context: Context) {
 
     private val appContext = context.applicationContext
     private val dir = File(appContext.cacheDir, "tv-covers").apply { mkdirs() }
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO.limitedParallelism(2))
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO.limitedParallelism(4))
     private val requestLock = Any()
     private val inFlight = HashMap<String, Deferred<Bitmap?>>()
     private val viewJobs = WeakHashMap<ImageView, Job>()
@@ -199,8 +199,8 @@ class TvArtworkLoader(context: Context) {
             return null
         }
         return try {
-            connection.connectTimeout = 5_000
-            connection.readTimeout = 8_000
+            connection.connectTimeout = 4_000
+            connection.readTimeout = 6_000
             connection.instanceFollowRedirects = true
             connection.setRequestProperty("Accept", "image/jpeg,image/png,image/webp,image/avif,image/*;q=0.8,*/*;q=0.5")
             connection.setRequestProperty("User-Agent", "hongguoTV/${BuildConfig.VERSION_NAME}")
@@ -271,34 +271,40 @@ class TvArtworkLoader(context: Context) {
     private fun candidateUrls(raw: String): List<String> {
         val source = raw.trim()
         if (source.isEmpty()) return emptyList()
-        val first = if (source.startsWith("http://", true)) "https://" + source.substringAfter("://") else source
-        val result = LinkedHashSet<String>()
-        result.add(first)
+        val first = if (source.startsWith("http://", true)) {
+            "https://" + source.substringAfter("://")
+        } else source
         val uri = runCatching { URI(first) }.getOrNull()
         val host = uri?.host.orEmpty().lowercase()
         val path = uri?.path.orEmpty()
+        val result = LinkedHashSet<String>()
+
+        // Prefer the CDN's lightweight JPEG rendition instead of first waiting
+        // on the original full-size image, which may time out on older TV networks.
         if ((host.endsWith(".fqnovelpic.com") || host.endsWith(".byteimg.com")) &&
             (path.contains("/novel-pic/") || path.contains("/novel-static/"))) {
             val segment = if (path.contains("/novel-pic/")) "/novel-pic/" else "/novel-static/"
             val id = path.substringAfter(segment).substringBefore("~").substringBefore(".")
             if (id.matches(Regex("[a-fA-F0-9]{32}"))) {
-                result.add("https://p3-novel.byteimg.com/img$segment$id~tplv-noop.jpeg")
-                result.add("https://p3-novel.byteimg.com/img$segment$id~tplv-shrink:48:0.jpeg")
-            } else {
-                val legacy = Regex("~tplv-[^/?]+").replace(path, "~tplv-noop.jpeg")
-                if (legacy != path && uri != null) {
-                    result.add(URI(uri.scheme, uri.authority, legacy, uri.query, null).toASCIIString())
-                }
+                result.add("https://p3-novel.byteimg.com/img" + segment + id + "~tplv-noop.jpeg")
             }
-        } else if ((host.endsWith(".byteimg.com") || host.endsWith(".fqnovelpic.com")) &&
+        }
+
+        if ((host.endsWith(".byteimg.com") || host.endsWith(".fqnovelpic.com")) &&
             path.contains("~tplv-obj.image")) {
             val legacy = path.replace("~tplv-obj.image", "~tplv-noop.jpeg")
-            if (uri != null) result.add(URI(uri.scheme, uri.authority, legacy, uri.query, null).toASCIIString())
+            if (uri != null) {
+                result.add(URI(uri.scheme, uri.authority, legacy, uri.query, null).toASCIIString())
+            }
         }
+
+        // Always retain the server URL as a fallback for sources with no JPEG variant.
+        result.add(first)
         // A few older sources genuinely only serve HTTP. Try that last, after HTTPS.
         if (source.startsWith("http://", true)) result.add(source)
-        return result.filter { it.startsWith("https://", true) || it.startsWith("http://", true) }
-            .distinct()
+        return result.filter {
+            it.startsWith("https://", true) || it.startsWith("http://", true)
+        }.distinct()
     }
 
     private fun key(raw: String): String {

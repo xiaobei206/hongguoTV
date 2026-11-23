@@ -7,6 +7,7 @@ import android.graphics.drawable.GradientDrawable
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
+import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
@@ -46,41 +47,77 @@ class TvCardAdapter(
             orientation = LinearLayout.VERTICAL
             isFocusable = true
             isFocusableInTouchMode = true
+            clipChildren = false
             background = cardBackground(false)
-            setPadding(dp(5), dp(5), dp(5), dp(6))
-            layoutParams = RecyclerView.LayoutParams(-1, dp(268)).apply {
-                setMargins(dp(5), dp(6), dp(5), dp(8))
+            setPadding(dp(6), dp(5), dp(6), dp(6))
+            layoutParams = RecyclerView.LayoutParams(-1, dp(310)).apply {
+                setMargins(dp(4), dp(5), dp(4), dp(8))
             }
+        }
+        val posterFrame = FrameLayout(context).apply {
+            background = GradientDrawable().apply {
+                cornerRadius = dp(11).toFloat()
+                setColor(0xff202c3b.toInt())
+            }
+            clipToOutline = true
         }
         val poster = ImageView(context).apply {
             scaleType = ImageView.ScaleType.CENTER_CROP
-            layoutParams = LinearLayout.LayoutParams(-1, dp(178))
-            setBackgroundColor(0xff243449.toInt())
+            setBackgroundColor(0xff202c3b.toInt())
+            contentDescription = "剧集海报"
         }
-        val title = TextView(context).apply {
-            setTextColor(Color.WHITE)
-            textSize = 18f
+        posterFrame.addView(poster, FrameLayout.LayoutParams(-1, -1))
+        posterFrame.addView(View(context).apply {
+            background = GradientDrawable(
+                GradientDrawable.Orientation.TOP_BOTTOM,
+                intArrayOf(0x00000000, 0x00000000, 0xb9000000.toInt()),
+            )
+        }, FrameLayout.LayoutParams(-1, -1))
+        val rankBadge = TextView(context).apply {
+            textSize = 11f
             typeface = Typeface.DEFAULT_BOLD
+            setTextColor(0xff10151c.toInt())
+            gravity = Gravity.CENTER
+            setPadding(dp(9), dp(4), dp(9), dp(4))
+            background = badgeBackground(true)
+            visibility = View.GONE
+        }
+        posterFrame.addView(rankBadge, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT, dp(25), Gravity.TOP or Gravity.START,
+        ).apply { leftMargin = dp(8); topMargin = dp(8) })
+        root.addView(posterFrame, LinearLayout.LayoutParams(-1, dp(230)))
+        val title = TextView(context).apply {
+            setTextColor(0xfff5f7fb.toInt())
+            textSize = 16f
+            typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
             maxLines = 2
+            ellipsize = android.text.TextUtils.TruncateAt.END
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(4), dp(4), dp(4), 0)
+            setPadding(dp(3), dp(4), dp(3), 0)
         }
         val subtitle = TextView(context).apply {
-            setTextColor(0xffa9b5c5.toInt())
-            textSize = 14f
+            setTextColor(0xff92a4b8.toInt())
+            textSize = 12f
             maxLines = 1
-            setPadding(dp(4), dp(2), dp(4), 0)
+            ellipsize = android.text.TextUtils.TruncateAt.END
+            setPadding(dp(3), 0, dp(3), 0)
         }
-        root.addView(poster)
-        root.addView(title, LinearLayout.LayoutParams(-1, dp(44)))
-        root.addView(subtitle)
-        return Holder(root, poster, title, subtitle)
+        root.addView(title, LinearLayout.LayoutParams(-1, dp(40)))
+        root.addView(subtitle, LinearLayout.LayoutParams(-1, dp(20)))
+        return Holder(root, poster, title, subtitle, rankBadge)
     }
 
     override fun onBindViewHolder(holder: Holder, position: Int) {
         val card = items[position]
         holder.title.text = card.title
-        holder.subtitle.text = card.sub.ifBlank { card.episodes.takeIf { it > 0 }?.let { "$it 集" }.orEmpty() }
+        holder.subtitle.text = card.sub.ifBlank {
+            if (card.episodes > 0) card.episodes.toString() + " 集" else "精彩短剧"
+        }
+        holder.rankBadge.visibility = if (card.rank > 0) View.VISIBLE else View.GONE
+        if (card.rank > 0) {
+            holder.rankBadge.text = "TOP " + card.rank.toString().padStart(2, '0')
+            holder.rankBadge.background = badgeBackground(card.rank <= 3)
+        }
         artwork.load(card.cover, holder.poster)
         holder.itemView.setOnClickListener { onClick(card) }
         holder.itemView.setOnLongClickListener { onLongClick(card); true }
@@ -88,7 +125,8 @@ class TvCardAdapter(
             view.background = cardBackground(focused)
             view.scaleX = if (focused) 1.035f else 1f
             view.scaleY = if (focused) 1.035f else 1f
-            view.elevation = if (focused) dp(7).toFloat() else 0f
+            view.elevation = if (focused) dp(8).toFloat() else 0f
+            holder.title.setTextColor(if (focused) 0xffffd19b.toInt() else 0xfff5f7fb.toInt())
         }
         holder.itemView.contentDescription = card.title
     }
@@ -98,16 +136,29 @@ class TvCardAdapter(
         super.onViewRecycled(holder)
     }
 
-    class Holder(root: View, val poster: ImageView, val title: TextView, val subtitle: TextView) :
-        RecyclerView.ViewHolder(root)
+    class Holder(
+        root: View,
+        val poster: ImageView,
+        val title: TextView,
+        val subtitle: TextView,
+        val rankBadge: TextView,
+    ) : RecyclerView.ViewHolder(root)
 
     private fun cardBackground(focused: Boolean) = GradientDrawable().apply {
-        cornerRadius = dp(9).toFloat()
-        setColor(if (focused) 0xff26364a.toInt() else 0xff151e2b.toInt())
-        setStroke(dp(if (focused) 3 else 1), if (focused) 0xffffb45c.toInt() else 0xff2b394a.toInt())
+        cornerRadius = dp(13).toFloat()
+        setColor(if (focused) 0xff1e2d3e.toInt() else 0xff111a26.toInt())
+        setStroke(dp(if (focused) 3 else 1),
+            if (focused) 0xffffb45c.toInt() else 0xff29384a.toInt())
     }
 
-    private fun dp(value: Int) = (value * context.resources.displayMetrics.density).toInt()
+    private fun badgeBackground(topThree: Boolean) = GradientDrawable().apply {
+        cornerRadius = dp(8).toFloat()
+        setColor(if (topThree) 0xffffbd68.toInt() else 0xe51a2635.toInt())
+        if (!topThree) setStroke(dp(1), 0xff61748a.toInt())
+    }
+
+    private fun dp(value: Int) =
+        (value * context.resources.displayMetrics.density).toInt()
 }
 
 class TvEpisodeAdapter(private val context: Context, private val onClick: (Episode) -> Unit) :
@@ -164,7 +215,7 @@ class TvEpisodeAdapter(private val context: Context, private val onClick: (Episo
         holder.label.onFocusChangeListener = View.OnFocusChangeListener { view, focused ->
             view.background = episodeBackground(episode.number == selected, focused)
         }
-        holder.label.contentDescription = "第 ${episode.number} 集" + if (episode.playable) "" else "暂不可播放"
+        holder.label.contentDescription = "第 " + episode.number + " 集" + if (episode.playable) "" else "暂不可播放"
     }
 
     class Holder(val label: TextView) : RecyclerView.ViewHolder(label)
