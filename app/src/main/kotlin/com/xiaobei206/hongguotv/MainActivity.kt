@@ -292,7 +292,7 @@ class MainActivity : ComponentActivity() {
     private fun buildFeedContent() {
         contentHost.removeAllViews()
         val view = ComposeView(this).apply {
-            setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnViewTreeLifecycleDestroyed)
+            setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnDetachedFromWindowOrReleasedFromPool)
         }
         contentHost.addView(view, FrameLayout.LayoutParams(-1, -1))
         view.setContent {
@@ -500,6 +500,8 @@ class MainActivity : ComponentActivity() {
 
     private fun buildDetailContent() {
         contentHost.removeAllViews()
+        composeFeed = null
+        composeFeedUi = null
         composeDetailUi = null
         val view = ComposeView(this).apply {
             setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnViewTreeLifecycleDestroyed)
@@ -921,6 +923,9 @@ class MainActivity : ComponentActivity() {
 
     private fun buildInfoContent(settings: Boolean) {
         contentHost.removeAllViews()
+        composeFeed = null
+        composeFeedUi = null
+        composeDetailUi = null
         val view = ComposeView(this).apply {
             setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnViewTreeLifecycleDestroyed)
         }
