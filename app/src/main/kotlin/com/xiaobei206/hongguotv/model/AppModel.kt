@@ -21,6 +21,7 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
 import org.json.JSONArray
 import java.io.File
+import java.security.MessageDigest
 
 /**
  * AppModel is the state the app shows. It belongs to the main thread: its
@@ -187,7 +188,11 @@ class AppModel(
                         }
                     }
                 }.apply {
-                    onPage = { p -> if (p.contents.isNotEmpty()) rankContents = p.contents }
+                    onPage = { p ->
+                        if (p.contents.isNotEmpty()) rankContents = p.contents
+                        saveCatalogCache("rank:$content:$board", cards)
+                    }
+                    restoreCatalogCache("rank:$content:$board", this)
                 }
             }
         }
@@ -208,7 +213,11 @@ class AppModel(
                         }
                     }
                 }.apply {
-                    onPage = { p -> if (p.dates.isNotEmpty()) newDates = p.dates }
+                    onPage = { p ->
+                        if (p.dates.isNotEmpty()) newDates = p.dates
+                        saveCatalogCache("new:${date.ifEmpty { todayKey() }}", cards)
+                    }
+                    restoreCatalogCache("new:${date.ifEmpty { todayKey() }}", this)
                 }
             }
         }
@@ -290,6 +299,49 @@ class AppModel(
     private fun saveHomeCache(cards: List<Card>) {
         val snapshot = cards.take(48)
         scope.launch(Dispatchers.IO) { writeHomeCache(snapshot) }
+    }
+
+    /** Restore a saved first page before starting a slow catalog request. */
+    private fun catalogCacheFile(key: String): File {
+        val hash = MessageDigest.getInstance("SHA-1").digest(key.toByteArray())
+            .joinToString("") { "%02x".format(it) }
+        return File(cacheDir, "feed-$hash.json")
+    }
+
+    private fun restoreCatalogCache(key: String, feed: Feed) {
+        try {
+            val file = catalogCacheFile(key)
+            if (!file.isFile) return
+            val array = JSONArray(file.readText())
+            val cached = (0 until array.length()).mapNotNull { array.optJSONObject(it)?.let(Card::fromJson) }
+            if (cached.isNotEmpty()) {
+                feed.add(FeedPage(cached, more = true))
+                feed.stale = true
+                debugLog { "catalog cache restored key=$key cards=${cached.size}" }
+            }
+        } catch (e: Exception) {
+            debugLog { "catalog cache read failed key=$key error=$e" }
+        }
+    }
+
+    private fun saveCatalogCache(key: String, cards: List<Card>) {
+        val snapshot = cards.take(48)
+        scope.launch(Dispatchers.IO) {
+            try {
+                val array = JSONArray()
+                snapshot.forEach { array.put(it.toJson()) }
+                val target = catalogCacheFile(key)
+                target.parentFile?.mkdirs()
+                val temp = File(target.parentFile, target.name + ".tmp")
+                temp.writeText(array.toString())
+                if (!temp.renameTo(target)) {
+                    temp.copyTo(target, overwrite = true)
+                    temp.delete()
+                }
+            } catch (e: Exception) {
+                debugLog { "catalog cache write failed key=$key error=$e" }
+            }
+        }
     }
 
     // MARK: - Series

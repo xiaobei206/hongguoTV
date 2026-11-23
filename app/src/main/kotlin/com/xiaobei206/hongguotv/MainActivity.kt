@@ -5,6 +5,7 @@ import android.app.AlertDialog
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.content.Intent
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
@@ -14,6 +15,7 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.os.StatFs
+import android.net.Uri
 import android.text.InputType
 import android.view.Gravity
 import android.view.KeyEvent
@@ -64,6 +66,9 @@ class MainActivity : ComponentActivity() {
 
     private val tvApp get() = application as TvApplication
     private val model: AppModel? get() = tvApp.model
+    private val updateManager by lazy { TvUpdateManager(this) }
+    private var checkingForUpdate = false
+    private var pendingInstallApk: File? = null
     private var screen by mutableStateOf(Screen.HOME)
     private var parentScreen = Screen.HOME
     private var currentFeed: Feed? = null
@@ -145,6 +150,9 @@ class MainActivity : ComponentActivity() {
             m.reopenPlayer()
             showPlayer()
         }
+        handler.postDelayed({
+            if (!isFinishing && screen != Screen.PLAYER) checkForUpdate(manual = false)
+        }, 5_000L)
     }
 
     private fun buildShell() {
@@ -251,6 +259,7 @@ class MainActivity : ComponentActivity() {
             adapter = cardAdapter
             setHasFixedSize(true)
             setItemViewCacheSize(3)
+            itemAnimator = null
             overScrollMode = View.OVER_SCROLL_NEVER
             setPadding(dp(2), dp(4), dp(2), dp(10))
             clipToPadding = false
@@ -775,8 +784,138 @@ class MainActivity : ComponentActivity() {
                         toast("封面缓存已清理")
                     }.show()
             }, LinearLayout.LayoutParams(dp(190), dp(48)))
+            column.addView(navButton("立即检查更新") {
+                checkForUpdate(manual = true)
+            }, LinearLayout.LayoutParams(dp(220), dp(48)))
+            column.addView(text("自动检查：每 12 小时一次。下载安装时由系统确认。", 14f, 0xff9eacbd.toInt()),
+                LinearLayout.LayoutParams(-1, dp(34)))
         }
         contentHost.addView(column, FrameLayout.LayoutParams(-1, -1))
+    }
+
+
+    private fun checkForUpdate(manual: Boolean) {
+        if (checkingForUpdate) {
+            if (manual) toast("正在检查更新，请稍候")
+            return
+        }
+        if (!manual && !updateManager.shouldAutoCheck()) return
+        if (!manual) updateManager.markAutoCheck()
+        checkingForUpdate = true
+        if (manual) toast("正在检查更新…")
+        lifecycleScope.launch {
+            val result = updateManager.check()
+            checkingForUpdate = false
+            when (result) {
+                is TvUpdateCheck.UpToDate -> if (manual) {
+                    AlertDialog.Builder(this@MainActivity)
+                        .setTitle("已是最新版本")
+                        .setMessage("当前版本：${BuildConfig.VERSION_NAME}\n暂未发现更新。")
+                        .setPositiveButton("确定", null)
+                        .show()
+                }
+                is TvUpdateCheck.Failed -> if (manual) {
+                    AlertDialog.Builder(this@MainActivity)
+                        .setTitle("检查更新失败")
+                        .setMessage(result.message)
+                        .setPositiveButton("确定", null)
+                        .show()
+                }
+                is TvUpdateCheck.Available -> showUpdateDialog(result.release)
+            }
+        }
+    }
+
+    private fun showUpdateDialog(release: TvUpdateRelease) {
+        if (isFinishing || isDestroyed) return
+        val notes = release.notes.lineSequence()
+            .dropWhile { !it.trim().startsWith("## [${release.version}]") }
+            .drop(1)
+            .takeWhile { !it.trim().startsWith("## [") }
+            .joinToString("\n")
+            .trim()
+            .take(1000)
+            .ifBlank { "修复问题并改善稳定性。" }
+        AlertDialog.Builder(this)
+            .setTitle("发现新版本 v${release.version}")
+            .setMessage("当前版本：${BuildConfig.VERSION_NAME}\n新版本：${release.version}\n\n${notes}\n\n下载后将打开系统安装器确认更新。")
+            .setNegativeButton("稍后", null)
+            .setNeutralButton("查看 Release") { _, _ ->
+                runCatching { startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(release.pageUrl))) }
+                    .onFailure { toast("无法打开 Release 页面") }
+            }
+            .setPositiveButton("下载并安装") { _, _ -> downloadAndInstall(release) }
+            .show()
+    }
+
+    private fun downloadAndInstall(release: TvUpdateRelease) {
+        val progress = AlertDialog.Builder(this)
+            .setTitle("正在下载更新")
+            .setMessage("版本 v${release.version}\n正在下载并校验安装包，请保持网络连接。")
+            .setCancelable(false)
+            .create()
+        progress.show()
+        lifecycleScope.launch {
+            try {
+                val apk = updateManager.downloadAndVerify(release)
+                progress.dismiss()
+                pendingInstallApk = apk
+                installVerifiedApk(apk)
+            } catch (e: Exception) {
+                progress.dismiss()
+                AlertDialog.Builder(this@MainActivity)
+                    .setTitle("更新下载失败")
+                    .setMessage(e.message ?: "下载失败，请检查网络后重试。")
+                    .setPositiveButton("确定", null)
+                    .show()
+            }
+        }
+    }
+
+    private fun installVerifiedApk(apk: File) {
+        if (!apk.isFile || apk.length() <= 0L) {
+            toast("安装包不存在，请重新检查更新")
+            return
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && !packageManager.canRequestPackageInstalls()) {
+            try {
+                val intent = Intent(
+                    android.provider.Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                    Uri.parse("package:$packageName")
+                )
+                startActivityForResult(intent, REQUEST_INSTALL_PERMISSION)
+            } catch (e: Exception) {
+                toast("请在系统设置中允许 hongguoTV 安装未知应用")
+            }
+            return
+        }
+        try {
+            val uri = androidx.core.content.FileProvider.getUriForFile(
+                this, "$packageName.updatefileprovider", apk
+            )
+            val intent = Intent(Intent.ACTION_VIEW).apply {
+                setDataAndType(uri, "application/vnd.android.package-archive")
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            startActivity(intent)
+        } catch (e: Exception) {
+            toast("无法打开系统安装器：${e.message ?: "未知错误"}")
+        }
+    }
+
+    @Deprecated("Deprecated in Android 13; retained for Android TV compatibility")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == REQUEST_INSTALL_PERMISSION) {
+            val apk = pendingInstallApk
+            pendingInstallApk = null
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O || packageManager.canRequestPackageInstalls()) {
+                if (apk != null) installVerifiedApk(apk)
+            } else {
+                toast("未允许安装未知应用，更新没有安装")
+            }
+        }
     }
 
     private fun deviceReport(): String {
@@ -992,4 +1131,8 @@ class MainActivity : ComponentActivity() {
 
     private fun toast(message: String) =
         android.widget.Toast.makeText(this, message, android.widget.Toast.LENGTH_SHORT).show()
+
+    companion object {
+        private const val REQUEST_INSTALL_PERMISSION = 7314
+    }
 }

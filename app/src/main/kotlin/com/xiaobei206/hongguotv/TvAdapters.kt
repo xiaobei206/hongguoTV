@@ -10,6 +10,7 @@ import android.view.ViewGroup
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
+import androidx.recyclerview.widget.DiffUtil
 import androidx.recyclerview.widget.RecyclerView
 import com.xiaobei206.hongguotv.model.Card
 import dev.openhongguo.Episode
@@ -24,8 +25,18 @@ class TvCardAdapter(
 
     fun submit(next: List<Card>) {
         if (items == next) return
-        items = next
-        notifyDataSetChanged()
+        val old = items
+        val updated = next.toList()
+        val diff = DiffUtil.calculateDiff(object : DiffUtil.Callback() {
+            override fun getOldListSize() = old.size
+            override fun getNewListSize() = updated.size
+            override fun areItemsTheSame(oldPosition: Int, newPosition: Int) =
+                old[oldPosition].id == updated[newPosition].id
+            override fun areContentsTheSame(oldPosition: Int, newPosition: Int) =
+                old[oldPosition] == updated[newPosition]
+        }, false)
+        items = updated
+        diff.dispatchUpdatesTo(this)
     }
 
     override fun getItemCount() = items.size
@@ -82,6 +93,11 @@ class TvCardAdapter(
         holder.itemView.contentDescription = card.title
     }
 
+    override fun onViewRecycled(holder: Holder) {
+        artwork.cancel(holder.poster)
+        super.onViewRecycled(holder)
+    }
+
     class Holder(root: View, val poster: ImageView, val title: TextView, val subtitle: TextView) :
         RecyclerView.ViewHolder(root)
 
@@ -100,9 +116,25 @@ class TvEpisodeAdapter(private val context: Context, private val onClick: (Episo
     private var selected = 0
 
     fun submit(next: List<Episode>, current: Int) {
-        items = next
+        if (items == next && selected == current) return
+        val old = items
+        val oldSelected = selected
+        val updated = next.toList()
+        val diff = DiffUtil.calculateDiff(object : DiffUtil.Callback() {
+            override fun getOldListSize() = old.size
+            override fun getNewListSize() = updated.size
+            override fun areItemsTheSame(oldPosition: Int, newPosition: Int) =
+                old[oldPosition].number == updated[newPosition].number
+            override fun areContentsTheSame(oldPosition: Int, newPosition: Int): Boolean {
+                val before = old[oldPosition]
+                val after = updated[newPosition]
+                return before == after &&
+                    (before.number == oldSelected) == (after.number == current)
+            }
+        }, false)
+        items = updated
         selected = current
-        notifyDataSetChanged()
+        diff.dispatchUpdatesTo(this)
     }
 
     override fun getItemCount() = items.size
