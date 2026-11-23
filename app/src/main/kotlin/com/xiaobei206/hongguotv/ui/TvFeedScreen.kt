@@ -457,7 +457,9 @@ private fun PosterTile(
                 val keyEvent = event.nativeKeyEvent
                 val confirm = keyEvent.keyCode == AndroidKeyEvent.KEYCODE_DPAD_CENTER ||
                     keyEvent.keyCode == AndroidKeyEvent.KEYCODE_ENTER ||
-                    keyEvent.keyCode == AndroidKeyEvent.KEYCODE_NUMPAD_ENTER
+                    keyEvent.keyCode == AndroidKeyEvent.KEYCODE_NUMPAD_ENTER ||
+                    keyEvent.keyCode == AndroidKeyEvent.KEYCODE_BUTTON_SELECT ||
+                    keyEvent.keyCode == AndroidKeyEvent.KEYCODE_BUTTON_A
                 if (!confirm) return@onPreviewKeyEvent false
                 when (keyEvent.action) {
                     AndroidKeyEvent.ACTION_DOWN -> {
