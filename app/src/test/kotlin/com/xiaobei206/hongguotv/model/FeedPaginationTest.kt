@@ -26,9 +26,9 @@ class FeedPaginationTest {
         }
 
         try {
-            feed.loadMore()
+            feed.loadMore(1)
             assertEquals(listOf(""), requested)
-            feed.loadMore()
+            feed.loadMore(1)
             assertEquals(listOf("", "c1", "c2", "c3"), requested)
             assertEquals(listOf("a", "b"), feed.cards.map { it.id })
             assertTrue(feed.wantsMore)
@@ -52,7 +52,7 @@ class FeedPaginationTest {
         }
 
         try {
-            feed.loadMore()
+            feed.loadMore(1)
             assertEquals(7, requested.size)
             assertEquals("found", feed.cards.single().id)
             assertTrue(feed.wantsMore)
@@ -61,6 +61,29 @@ class FeedPaginationTest {
         }
     }
 
+    @Test
+    fun accumulatesNewCardsAcrossSparsePagesUntilTargetIsReached() {
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
+        val requested = mutableListOf<String>()
+        val feed = Feed(scope) { cursor ->
+            requested += cursor
+            val page = requested.size
+            FeedPage(
+                cards = listOf(Card("card-$page", "作品 $page")),
+                cursor = "cursor-$page",
+                more = true,
+            )
+        }
+
+        try {
+            feed.loadMore(3)
+            assertEquals(listOf("", "cursor-1", "cursor-2"), requested)
+            assertEquals(listOf("card-1", "card-2", "card-3"), feed.cards.map { it.id })
+            assertTrue(feed.wantsMore)
+        } finally {
+            scope.cancel()
+        }
+    }
     @Test
     fun stopsWhenServerClaimsMoreButDoesNotAdvanceCursor() {
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
@@ -71,7 +94,7 @@ class FeedPaginationTest {
         }
 
         try {
-            feed.loadMore()
+            feed.loadMore(1)
             assertEquals(1, requests)
             assertEquals(listOf("a"), feed.cards.map { it.id })
             assertFalse(feed.wantsMore)
