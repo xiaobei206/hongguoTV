@@ -26,25 +26,19 @@ import android.view.inputmethod.InputMethodManager
 import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.GridLayout
+import android.widget.HorizontalScrollView
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.SeekBar
 import android.widget.TextView
 import androidx.activity.ComponentActivity
-import androidx.compose.ui.platform.ComposeView
-import androidx.compose.ui.platform.ViewCompositionStrategy
-import com.xiaobei206.hongguotv.ui.TvFeedFilterChoice
-import com.xiaobei206.hongguotv.ui.TvFeedFilterRow
-import com.xiaobei206.hongguotv.ui.TvFeedScreen
-import com.xiaobei206.hongguotv.ui.TvFeedUiState
-import com.xiaobei206.hongguotv.ui.TvDetailScreen
-import com.xiaobei206.hongguotv.ui.TvDetailUiState
-import com.xiaobei206.hongguotv.ui.TvInfoScreen
-import com.xiaobei206.hongguotv.ui.TvInfoAction
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
 import androidx.media3.ui.PlayerView
+import androidx.recyclerview.widget.GridLayoutManager
+import androidx.recyclerview.widget.RecyclerView
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -66,10 +60,13 @@ import dev.openhongguo.Episode
 import dev.openhongguo.RankBoard
 import dev.openhongguo.RankContent
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
+import kotlin.math.ceil
 
 @androidx.media3.common.util.UnstableApi
 class MainActivity : ComponentActivity() {
@@ -80,22 +77,27 @@ class MainActivity : ComponentActivity() {
     private val updateManager by lazy { TvUpdateManager(this) }
     private var checkingForUpdate = false
     private var pendingInstallApk: File? = null
+    private var feedPrefillJob: Job? = null
+    private var feedScrollLoadJob: Job? = null
     private var screen by mutableStateOf(Screen.HOME)
     private var parentScreen = Screen.HOME
     private var searchReturnScreen = Screen.HOME
     private var currentFeed: Feed? = null
     private var currentSeries: SeriesPage? = null
-    private var detailRevealPendingId: String? = null
     private var headerTitle = "推荐"
     private var renderedScreen: Screen? = null
-    private var composeFeed by mutableStateOf<Feed?>(null)
-    private var composeFeedUi by mutableStateOf<TvFeedUiState?>(null)
-    private var composeDetailUi by mutableStateOf<TvDetailUiState?>(null)
+    private var renderedFilterKey = ""
 
     private lateinit var shell: LinearLayout
     private lateinit var rail: LinearLayout
     private lateinit var contentHost: FrameLayout
     private lateinit var playerLayer: FrameLayout
+    private lateinit var header: TextView
+    private lateinit var subHeader: TextView
+    private lateinit var feedFilterHost: LinearLayout
+    private lateinit var recycler: RecyclerView
+    private lateinit var emptyState: TextView
+    private lateinit var cardAdapter: TvCardAdapter
     private lateinit var playerView: PlayerView
     private lateinit var playerControls: LinearLayout
     private lateinit var playerTitle: TextView
@@ -148,9 +150,6 @@ class MainActivity : ComponentActivity() {
         val currentRankContent: String,
         val newDates: List<String>,
         val newDate: String,
-        val detailPart: Int = 0,
-        val detailParts: List<String> = emptyList(),
-        val currentEpisodeNumber: Int = 0,
     )
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -163,6 +162,10 @@ class MainActivity : ComponentActivity() {
         if (m == null) {
             showStartupError(tvApp.startupError)
             return
+        }
+        cardAdapter = TvCardAdapter(this, tvApp.artwork, ::onCardSelected) { card ->
+            val added = m.favorites.toggle(Fav.of(card))
+            toast(if (added) "已收藏：${card.title}" else "已取消收藏：${card.title}")
         }
         enterFeed(Screen.HOME)
         lifecycleScope.launch {
@@ -189,13 +192,7 @@ class MainActivity : ComponentActivity() {
             setPadding(dp(12), dp(18), dp(10), dp(12))
             setBackgroundColor(0xff101925.toInt())
         }
-        val brand = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(7), dp(2), dp(7), dp(2))
-            addView(text("红果 TV", 23f, 0xff72dba0.toInt(), true), LinearLayout.LayoutParams(-1, dp(34)))
-            addView(text("大屏短剧", 12f, 0xff9bacbe.toInt()), LinearLayout.LayoutParams(-1, dp(22)))
-        }
-        rail.addView(brand, LinearLayout.LayoutParams(-1, dp(68)).apply { bottomMargin = dp(8) })
+        rail.addView(text("开心果 · TV", 26f, 0xff72dba0.toInt(), true), LinearLayout.LayoutParams(-1, dp(68)))
         addNav("首页", Screen.HOME)
         addNav("排行榜", Screen.RANK)
         addNav("新剧上线", Screen.NEW)
@@ -203,12 +200,10 @@ class MainActivity : ComponentActivity() {
         addNav("我的收藏", Screen.FAVORITES)
         addNav("观看历史", Screen.HISTORY)
         rail.addView(View(this), LinearLayout.LayoutParams(1, 0, 1f))
-        rail.addView(View(this).apply { setBackgroundColor(0xff273648.toInt()) },
-            LinearLayout.LayoutParams(-1, dp(1)).apply { topMargin = dp(7); bottomMargin = dp(7) })
         addNav("设备信息", Screen.DEVICE)
         addNav("设置", Screen.SETTINGS)
         contentHost = FrameLayout(this).apply { setPadding(dp(14), dp(8), dp(22), dp(12)) }
-        shell.addView(rail, LinearLayout.LayoutParams(dp(174), -1))
+        shell.addView(rail, LinearLayout.LayoutParams(dp(190), -1))
         shell.addView(contentHost, LinearLayout.LayoutParams(0, -1, 1f))
         root.addView(shell, FrameLayout.LayoutParams(-1, -1))
         playerLayer = FrameLayout(this).apply {
@@ -223,24 +218,16 @@ class MainActivity : ComponentActivity() {
     private fun addNav(label: String, target: Screen, action: (() -> Unit)? = null) {
         val button = navButton(label) { if (action != null) action() else navigate(target) }
         button.tag = target
-        rail.addView(button, LinearLayout.LayoutParams(-1, dp(48)).apply {
-            topMargin = dp(3); bottomMargin = dp(3); leftMargin = dp(2); rightMargin = dp(2)
-        })
+        rail.addView(button, LinearLayout.LayoutParams(-1, dp(56)))
     }
 
     private fun navigate(target: Screen) {
+        feedScrollLoadJob?.cancel()
         when (target) {
             Screen.HOME, Screen.RANK, Screen.NEW -> enterFeed(target)
             Screen.FAVORITES, Screen.HISTORY, Screen.DEVICE, Screen.SETTINGS -> {
                 parentScreen = Screen.HOME
                 currentFeed = null
-                headerTitle = when (target) {
-                    Screen.FAVORITES -> "我的收藏"
-                    Screen.HISTORY -> "观看历史"
-                    Screen.DEVICE -> "设备兼容性诊断"
-                    Screen.SETTINGS -> "设置"
-                    else -> headerTitle
-                }
                 screen = target
                 showShell()
             }
@@ -251,6 +238,10 @@ class MainActivity : ComponentActivity() {
 
     private fun enterFeed(target: Screen) {
         val m = model ?: return
+        feedPrefillJob?.cancel()
+        feedPrefillJob = null
+        feedScrollLoadJob?.cancel()
+        feedScrollLoadJob = null
         parentScreen = target
         currentSeries = null
         currentFeed = when (target) {
@@ -268,6 +259,7 @@ class MainActivity : ComponentActivity() {
         screen = target
         currentFeed?.let { if (!it.started || it.stale) it.loadMore() }
         showShell()
+        currentFeed?.let { feed -> scheduleInitialFeedPrefill(target, feed) }
     }
 
     private fun showShell() {
@@ -290,144 +282,272 @@ class MainActivity : ComponentActivity() {
 
     private fun buildFeedContent() {
         contentHost.removeAllViews()
-        composeFeed = null
-        composeFeedUi = null
-        composeDetailUi = null
-        val view = ComposeView(this).apply {
-            setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnDetachedFromWindowOrReleasedFromPool)
+        val column = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        val top = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+        header = text(headerTitle, 27f, Color.WHITE, true)
+        top.addView(header, LinearLayout.LayoutParams(0, dp(52), 1f))
+        top.addView(navButton("搜索") { openSearchDialog() }, LinearLayout.LayoutParams(dp(90), dp(42)))
+        top.addView(navButton("刷新") { refreshCurrentFeed() }, LinearLayout.LayoutParams(dp(90), dp(42)))
+        column.addView(top)
+        subHeader = text("方向键移动 · 确认打开 · 长按收藏", 16f, 0xffa7b2c2.toInt())
+        column.addView(subHeader, LinearLayout.LayoutParams(-1, dp(30)))
+        feedFilterHost = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; visibility = View.GONE }
+        renderedFilterKey = ""
+        column.addView(feedFilterHost, LinearLayout.LayoutParams(-1, ViewGroup.LayoutParams.WRAP_CONTENT))
+        recycler = RecyclerView(this).apply {
+            id = View.generateViewId()
+            layoutManager = GridLayoutManager(this@MainActivity, gridColumns())
+            adapter = cardAdapter
+            setHasFixedSize(true)
+            setItemViewCacheSize(3)
+            itemAnimator = null
+            overScrollMode = View.OVER_SCROLL_NEVER
+            setPadding(dp(2), dp(4), dp(2), dp(10))
+            clipToPadding = false
+            addOnScrollListener(object : RecyclerView.OnScrollListener() {
+                override fun onScrolled(rv: RecyclerView, dx: Int, dy: Int) {
+                    val manager = rv.layoutManager as? GridLayoutManager ?: return
+                    val feed = currentFeed ?: return
+                    if (dy > 0 &&
+                        manager.findLastVisibleItemPosition() >= manager.itemCount - gridColumns() * 3 &&
+                        feed.wantsMore) {
+                        loadMoreAtEnd(rv, feed)
+                    }
+                }
+            })
         }
-        contentHost.addView(view, FrameLayout.LayoutParams(-1, -1))
-        view.setContent {
-            val state = composeFeedUi
-            if (state != null) {
-                TvFeedScreen(
-                    state = state,
-                    feed = composeFeed,
-                    artwork = tvApp.artwork,
-                    onCardSelected = ::onCardSelected,
-                    onToggleFavorite = { card ->
-                        val added = model?.favorites?.toggle(Fav.of(card)) == true
-                        toast(if (added) "已收藏：${card.title}" else "已取消收藏：${card.title}")
-                    },
-                    onSearch = ::openSearchDialog,
-                    onRefresh = ::refreshCurrentFeed,
-                    onFilterSelected = ::onComposeFeedFilterSelected,
-                )
+        val frame = FrameLayout(this)
+        frame.addView(recycler, FrameLayout.LayoutParams(-1, -1))
+        emptyState = text("正在连接红果…", 18f, 0xffa7b2c2.toInt()).apply { gravity = Gravity.CENTER }
+        frame.addView(emptyState, FrameLayout.LayoutParams(-1, -1))
+        column.addView(frame, LinearLayout.LayoutParams(-1, 0, 1f))
+        contentHost.addView(column, FrameLayout.LayoutParams(-1, -1))
+        recycler.post {
+            if (cardAdapter.itemCount > 0) {
+                recycler.findViewHolderForAdapterPosition(0)?.itemView?.requestFocus()
+            } else {
+                rail.getChildAt(1)?.requestFocus()
+            }
+        }
+    }
+
+
+    /**
+     * Ranking and new-release APIs return a page at a time. Populate roughly two
+     * viewport-heights before asking the viewer to scroll, then let onScrolled
+     * keep a three-row buffer ahead during downward navigation. Empty cursor-advancing
+     * batches are retried while the viewer remains near the end of the grid.
+     */
+    private fun scheduleInitialFeedPrefill(target: Screen, feed: Feed) {
+        if (target != Screen.RANK && target != Screen.NEW) return
+        feedPrefillJob?.cancel()
+        feedScrollLoadJob?.cancel()
+        recycler.post {
+            if (screen != target || currentFeed !== feed) return@post
+            val rowExtent = dp(282).coerceAtLeast(1)
+            val visibleRows = ceil(recycler.height.toDouble() / rowExtent).toInt().coerceAtLeast(2)
+            val minimumItems = gridColumns() * visibleRows * 2
+            feedPrefillJob = lifecycleScope.launch {
+                var batches = 0
+                var stalledBatches = 0
+                while (isActive && screen == target && currentFeed === feed &&
+                    feed.cards.size < minimumItems && feed.wantsMore && batches < 12) {
+                    val previousCount = feed.cards.size
+                    if (!feed.loading) feed.loadMore()
+                    val completed = withTimeoutOrNull(25_000L) {
+                        snapshotFlow { feed.loading }.first { !it }
+                    } != null
+                    if (!completed) {
+                        android.util.Log.w("HongguoTVFeed", "prefill timed out screen=$target batch=$batches cards=${feed.cards.size}")
+                        break
+                    }
+                    batches++
+                    if (feed.error != null) {
+                        android.util.Log.w("HongguoTVFeed", "prefill stopped on error screen=$target error=${feed.error}")
+                        break
+                    }
+                    if (feed.cards.size <= previousCount) {
+                        stalledBatches++
+                        if (!feed.wantsMore || stalledBatches >= 4) {
+                            android.util.Log.w("HongguoTVFeed", "prefill stalled screen=$target cards=${feed.cards.size} batches=$batches more=${feed.wantsMore}")
+                            break
+                        }
+                    } else stalledBatches = 0
+                }
+                if (screen == target && currentFeed === feed) {
+                    android.util.Log.d("HongguoTVFeed", "prefill finished screen=$target cards=${feed.cards.size} target=$minimumItems batches=$batches more=${feed.wantsMore}")
+                }
             }
         }
     }
 
     private fun renderFeed(snapshot: UiSnapshot) {
-        composeFeed = currentFeed
-        val m = model
+        renderFeedFilters(snapshot)
+        cardAdapter.submit(snapshot.cards)
+        val hasCards = snapshot.cards.isNotEmpty()
+        emptyState.visibility = if (hasCards) View.GONE else View.VISIBLE
+        emptyState.text = when {
+            snapshot.loading -> "正在加载…"
+            snapshot.feedError.isNotBlank() -> "${snapshot.feedError}\n按刷新重试"
+            screen == Screen.FAVORITES -> "还没有收藏\n在剧集详情中保存喜欢的作品"
+            screen == Screen.HISTORY -> "还没有观看记录\n开始播放后会自动保存在这里"
+            else -> "暂时没有内容\n按刷新重新获取"
+        }
+        header.text = headerTitle
+        subHeader.text = when {
+            screen == Screen.HISTORY -> "确认：从上次进度继续播放 · 长按可收藏"
+            hasCards -> "已加载 ${snapshot.cards.size} 部" +
+                when {
+                    snapshot.loading && currentFeed?.wantsMore == true -> " · 正在加载更多…"
+                    snapshot.feedError.isNotBlank() -> " · 续载失败，按刷新重试"
+                    else -> " · 长按海报收藏"
+                }
+            else -> "红果内容通过网络加载 · 请确认电视已联网"
+        }
+    }
+
+    private fun renderFeedFilters(snapshot: UiSnapshot) {
+        val m = model ?: run { feedFilterHost.visibility = View.GONE; return }
         val today = todayKey()
-        val filterRows = when (screen) {
-            Screen.RANK -> buildList {
+        val filterKey = when (screen) {
+            Screen.RANK -> buildString {
+                append("rank|").append(snapshot.currentRankContent).append('|').append(snapshot.rankBoard).append('|')
+                snapshot.rankContents.forEach { append(it.id).append(':').append(it.name).append('|') }
+                append("boards|")
+                snapshot.rankBoards.forEach { append(it.id).append(':').append(it.name).append(':').append(it.selected).append('|') }
+            }
+            Screen.NEW -> "new|$today|${snapshot.newDate}|${snapshot.newDates.joinToString("|")}"
+            else -> screen.name
+        }
+        if (filterKey == renderedFilterKey) return
+        val focusedFilterKey = currentFocus?.takeIf { it.tag is String }?.tag as? String
+        renderedFilterKey = filterKey
+        feedFilterHost.removeAllViews()
+        when (screen) {
+            Screen.RANK -> {
                 if (snapshot.rankContents.isNotEmpty()) {
-                    add(TvFeedFilterRow("分类", snapshot.rankContents.map { content ->
-                        TvFeedFilterChoice(
+                    addFilterRow(feedFilterHost, snapshot.rankContents.map { content ->
+                        FilterChoice(
                             key = "rank-content:${content.id}",
                             label = content.name.ifBlank { content.id },
                             selected = snapshot.currentRankContent == content.id,
+                            onClick = {
+                                if (m.rankContent != content.id) {
+                                    m.rankContent = content.id
+                                    m.rankBoard = ""
+                                    enterFeed(Screen.RANK)
+                                }
+                            },
                         )
-                    }))
+                    })
                     if (snapshot.rankBoards.isNotEmpty()) {
-                        val choices = ArrayList<TvFeedFilterChoice>()
-                        choices += TvFeedFilterChoice(
+                        val choices = ArrayList<FilterChoice>()
+                        choices += FilterChoice(
                             key = "rank-board:default",
                             label = "默认",
                             selected = snapshot.rankBoard.isEmpty() && snapshot.rankBoards.none { it.selected },
+                            onClick = {
+                                if (m.rankBoard.isNotEmpty()) {
+                                    m.rankBoard = ""
+                                    enterFeed(Screen.RANK)
+                                }
+                            },
                         )
                         snapshot.rankBoards.forEach { board ->
-                            choices += TvFeedFilterChoice(
+                            choices += FilterChoice(
                                 key = "rank-board:${board.id}",
                                 label = board.name.ifBlank { board.id },
                                 selected = board.id == snapshot.rankBoard ||
                                     (snapshot.rankBoard.isEmpty() && board.selected),
+                                onClick = {
+                                    if (m.rankBoard != board.id) {
+                                        m.rankBoard = board.id
+                                        enterFeed(Screen.RANK)
+                                    }
+                                },
                             )
                         }
-                        add(TvFeedFilterRow("榜单", choices))
+                        addFilterRow(feedFilterHost, choices)
                     }
                 }
             }
-            Screen.NEW -> listOf(
-                TvFeedFilterRow(
-                    "上线日期",
-                    (listOf(today) + snapshot.newDates).distinct().map { date ->
-                        TvFeedFilterChoice(
-                            key = "new-date:$date",
-                            label = dayLabel(date, today),
-                            selected = m?.dayIsOn(date) == true,
-                        )
-                    },
-                ),
-            )
-            else -> emptyList()
-        }
-        val emptyMessage = when (screen) {
-            Screen.FAVORITES -> "还没有收藏\n在剧集详情中保存喜欢的作品"
-            Screen.HISTORY -> "还没有观看记录\n开始播放后会自动保存在这里"
-            else -> "暂时没有内容；确认电视已联网后，可以按刷新重试"
-        }
-        val status = when {
-            snapshot.cards.isNotEmpty() && snapshot.loading && currentFeed?.wantsMore == true ->
-                "已加载 ${snapshot.cards.size} 部 · 正在后台补载更多剧集"
-            snapshot.cards.isNotEmpty() && snapshot.feedError.isNotBlank() ->
-                "已加载 ${snapshot.cards.size} 部 · 本批续载失败，可刷新重试"
-            snapshot.cards.isNotEmpty() -> "已加载 ${snapshot.cards.size} 部 · 长按海报收藏"
-            snapshot.loading -> "正在连接红果并获取剧集"
-            else -> "电视遥控器可直接浏览海报；长按确认键可收藏"
-        }
-        val feedKey = buildString {
-            append(screen.name).append('|').append(headerTitle)
-            when (screen) {
-                Screen.RANK -> append('|').append(snapshot.currentRankContent).append('|').append(snapshot.rankBoard)
-                Screen.NEW -> append('|').append(snapshot.newDate)
-                else -> Unit
+            Screen.NEW -> {
+                val dates = (listOf(today) + snapshot.newDates).distinct()
+                addFilterRow(feedFilterHost, dates.map { date ->
+                    FilterChoice(
+                        key = "new-date:$date",
+                        label = dayLabel(date, today),
+                        selected = m.dayIsOn(date),
+                        onClick = {
+                            if (!m.dayIsOn(date)) {
+                                m.chooseDay(date)
+                                enterFeed(Screen.NEW)
+                            }
+                        },
+                    )
+                })
             }
+            else -> Unit
         }
-        composeFeedUi = TvFeedUiState(
-            screenKey = screen.name,
-            feedKey = feedKey,
-            title = headerTitle,
-            status = status,
-            cards = snapshot.cards,
-            loading = snapshot.loading,
-            error = snapshot.feedError,
-            emptyMessage = emptyMessage,
-            filterRows = filterRows,
-        )
+        feedFilterHost.visibility = if (feedFilterHost.childCount > 0) View.VISIBLE else View.GONE
+        if (focusedFilterKey != null) {
+            feedFilterHost.post { feedFilterHost.findViewWithTag<View>(focusedFilterKey)?.requestFocus() }
+        }
     }
 
-    private fun onComposeFeedFilterSelected(key: String) {
-        val m = model ?: return
-        when {
-            key.startsWith("rank-content:") -> {
-                val content = key.removePrefix("rank-content:")
-                if (m.rankContent != content) {
-                    m.rankContent = content
-                    m.rankBoard = ""
-                    enterFeed(Screen.RANK)
-                }
+    private fun addFilterRow(parent: LinearLayout, choices: List<FilterChoice>) {
+        if (choices.isEmpty()) return
+        val scroll = HorizontalScrollView(this).apply {
+            isHorizontalScrollBarEnabled = false
+            isFocusable = false
+            clipToPadding = false
+        }
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        val buttons = choices.map { choice ->
+            navButton(choice.label) { choice.onClick() }.apply {
+                tag = choice.key
+                isSelected = choice.selected
+                textSize = 16f
+                minWidth = dp(88)
+            }.also { button ->
+                row.addView(button, LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT, dp(42),
+                ).apply { rightMargin = dp(8) })
             }
-            key == "rank-board:default" -> {
-                if (m.rankBoard.isNotEmpty()) {
-                    m.rankBoard = ""
-                    enterFeed(Screen.RANK)
-                }
-            }
-            key.startsWith("rank-board:") -> {
-                val board = key.removePrefix("rank-board:")
-                if (m.rankBoard != board) {
-                    m.rankBoard = board
-                    enterFeed(Screen.RANK)
-                }
-            }
-            key.startsWith("new-date:") -> {
-                val date = key.removePrefix("new-date:")
-                if (!m.dayIsOn(date)) {
-                    m.chooseDay(date)
-                    enterFeed(Screen.NEW)
+        }
+        buttons.forEachIndexed { index, button ->
+            button.nextFocusLeftId = buttons.getOrNull(index - 1)?.id ?: button.id
+            button.nextFocusRightId = buttons.getOrNull(index + 1)?.id ?: button.id
+        }
+        scroll.addView(row, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.MATCH_PARENT,
+        ))
+        parent.addView(scroll, LinearLayout.LayoutParams(-1, dp(48)))
+    }
+
+    private fun loadMoreAtEnd(rv: RecyclerView, feed: Feed) {
+        if (feedScrollLoadJob?.isActive == true) return
+        feedScrollLoadJob = lifecycleScope.launch {
+            var emptyBatches = 0
+            while (isActive && screen in setOf(Screen.HOME, Screen.RANK, Screen.NEW, Screen.SEARCH) &&
+                currentFeed === feed && recycler === rv && feed.wantsMore) {
+                val manager = rv.layoutManager as? GridLayoutManager ?: break
+                val lastVisible = manager.findLastVisibleItemPosition()
+                if (manager.itemCount > 0 && lastVisible < manager.itemCount - gridColumns() * 3) break
+                val previousCount = feed.cards.size
+                if (!feed.loading) feed.loadMore()
+                val completed = withTimeoutOrNull(25_000L) {
+                    snapshotFlow { feed.loading }.first { !it }
+                } != null
+                if (!completed || feed.error != null) break
+                if (feed.cards.size > previousCount) break
+                emptyBatches++
+                if (emptyBatches >= 4) {
+                    android.util.Log.w("HongguoTVFeed", "scroll pagination paused after $emptyBatches empty batches; cursor still available")
+                    break
                 }
             }
         }
@@ -472,6 +592,8 @@ class MainActivity : ComponentActivity() {
     private fun doSearch(query: String) {
         val m = model ?: return
         if (screen != Screen.SEARCH) searchReturnScreen = screen
+        feedPrefillJob?.cancel()
+        feedScrollLoadJob?.cancel()
         currentFeed = m.searchFeed(query)
         headerTitle = "搜索：$query"
         screen = Screen.SEARCH
@@ -480,8 +602,11 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun onCardSelected(card: Card) {
+        feedScrollLoadJob?.cancel()
         if (screen == Screen.HISTORY) {
             val m = model ?: return
+            feedPrefillJob?.cancel()
+            feedPrefillJob = null
             parentScreen = Screen.HISTORY
             m.playSeason(card.id)
             screen = Screen.PLAYER
@@ -493,78 +618,114 @@ class MainActivity : ComponentActivity() {
 
     private fun openDetail(card: Card) {
         val m = model ?: return
+        feedPrefillJob?.cancel()
+        feedPrefillJob = null
+        feedScrollLoadJob?.cancel()
+        feedScrollLoadJob = null
         parentScreen = screen
         currentSeries = m.seriesPage(card.id, restartIfLoading = true)
-        detailRevealPendingId = card.id
         screen = Screen.DETAIL
         showShell()
     }
 
     private fun buildDetailContent() {
         contentHost.removeAllViews()
-        composeFeed = null
-        composeFeedUi = null
-        composeDetailUi = null
-        val view = ComposeView(this).apply {
-            setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnDetachedFromWindowOrReleasedFromPool)
+        val layout = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        val leftScroll = ScrollView(this).apply { isFillViewport = true }
+        val left = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(20), dp(14), dp(20), dp(20))
         }
-        contentHost.addView(view, FrameLayout.LayoutParams(-1, -1))
-        view.setContent {
-            val detail = composeDetailUi
-            if (detail != null) {
-                TvDetailScreen(
-                    state = detail,
-                    artwork = tvApp.artwork,
-                    onPlay = {
-                        val page = currentSeries
-                        if (page != null) {
-                            val resume = model?.resumePoint(page)
-                            if (resume != null) startPlayer(resume.seriesID, resume.number, resume.start)
-                            else startPlayer(page.id, 1, 0.0)
-                        }
-                    },
-                    onFavorite = {
-                        val page = currentSeries
-                        val series = page?.series
-                        if (page != null && series != null) {
-                            val added = model?.favorites?.toggle(Fav.of(Card.of(series))) == true
-                            toast(if (added) "已收藏" else "已取消收藏")
-                        }
-                    },
-                    onEpisodeSelected = { episode ->
-                        val page = currentSeries
-                        if (page != null) {
-                            if (episode.playable) startPlayer(page.id, episode.number, 0.0)
-                            else toast("这一集暂不可播放")
-                        }
-                    },
-                    onPartSelected = { part -> currentSeries?.part = part },
-                    onRetry = { currentSeries?.let { model?.loadSeries(it, force = true) } },
-                )
+        header = text("剧集详情", 26f, Color.WHITE, true)
+        left.addView(header, LinearLayout.LayoutParams(-1, dp(48)))
+        subHeader = text("正在读取剧集信息…", 15f, 0xffa7b2c2.toInt())
+        left.addView(subHeader, LinearLayout.LayoutParams(-1, dp(38)))
+        val poster = ImageView(this).apply {
+            scaleType = ImageView.ScaleType.CENTER_CROP
+            tag = "detail-cover"
+            setBackgroundColor(0xff243449.toInt())
+        }
+        left.addView(poster, LinearLayout.LayoutParams(dp(170), dp(230)).apply {
+            topMargin = dp(12); bottomMargin = dp(12)
+        })
+        left.addView(text("剧情简介", 19f, Color.WHITE, true))
+        val description = text("", 15f, 0xffd2d9e2.toInt()).apply {
+            tag = "detail-description"
+            maxLines = 7
+            ellipsize = android.text.TextUtils.TruncateAt.END
+        }
+        left.addView(description, LinearLayout.LayoutParams(-1, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+            topMargin = dp(6); bottomMargin = dp(14)
+        })
+        val actions = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            tag = "detail-actions"
+        }
+        left.addView(actions, LinearLayout.LayoutParams(-1, ViewGroup.LayoutParams.WRAP_CONTENT))
+        leftScroll.addView(left, FrameLayout.LayoutParams(-1, ViewGroup.LayoutParams.WRAP_CONTENT))
+
+        val right = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(12), dp(16), dp(12), dp(12))
+        }
+        right.addView(text("选择剧集", 22f, Color.WHITE, true), LinearLayout.LayoutParams(-1, dp(48)))
+        right.addView(text("方向键移动 · 确认播放 · 返回上一页", 13f, 0xffa7b2c2.toInt()),
+            LinearLayout.LayoutParams(-1, dp(28)))
+        val episodes = RecyclerView(this).apply {
+            tag = "detail-episodes"
+            layoutManager = GridLayoutManager(this@MainActivity, 8)
+            adapter = TvEpisodeAdapter(this@MainActivity) { episode ->
+                val id = currentSeries?.id ?: return@TvEpisodeAdapter
+                if (episode.playable) startPlayer(id, episode.number, 0.0) else toast("这一集暂不可播放")
             }
+            setHasFixedSize(true)
+            setItemViewCacheSize(8)
+            overScrollMode = View.OVER_SCROLL_NEVER
         }
+        right.addView(episodes, LinearLayout.LayoutParams(-1, 0, 1f))
+        layout.addView(leftScroll, LinearLayout.LayoutParams(0, -1, 4f))
+        layout.addView(right, LinearLayout.LayoutParams(0, -1, 6f))
+        contentHost.addView(layout, FrameLayout.LayoutParams(-1, -1))
     }
 
     private fun renderDetail(snapshot: UiSnapshot) {
         val page = currentSeries ?: return
-        if (detailRevealPendingId == page.id && snapshot.series != null && snapshot.episodes.isNotEmpty()) {
-            model?.resumePoint(page)?.let { page.reveal(it.number) }
-            detailRevealPendingId = null
+        header.text = snapshot.series?.title ?: "剧集详情"
+        subHeader.text = when {
+            snapshot.series != null -> metaLine(snapshot.series)
+            snapshot.detailError.isNotBlank() -> snapshot.detailError
+            else -> "正在加载剧集信息…"
         }
-        val resume = model?.resumePoint(page)
-        composeDetailUi = TvDetailUiState(
-            seriesId = page.id,
-            series = snapshot.series,
-            meta = snapshot.series?.let(::metaLine).orEmpty(),
-            resumeLabel = resume?.label ?: "播放第 1 集",
-            episodes = snapshot.episodes,
-            partLabels = snapshot.detailParts,
-            selectedPart = snapshot.detailPart.coerceIn(0, (snapshot.detailParts.size - 1).coerceAtLeast(0)),
-            currentEpisodeNumber = snapshot.currentEpisodeNumber,
-            favorite = model?.favorites?.has(page.id) == true,
-            loading = snapshot.detailLoading,
-            error = snapshot.detailError,
-        )
+        val description = contentHost.findViewWithTag<TextView>("detail-description")
+        description?.text = snapshot.series?.description.orEmpty()
+        val poster = contentHost.findViewWithTag<ImageView>("detail-cover")
+        if (snapshot.series != null && poster != null && poster.tag != snapshot.series.coverUrl) {
+            poster.tag = snapshot.series.coverUrl
+            tvApp.artwork.load(snapshot.series.coverUrl, poster)
+        }
+        val actions = contentHost.findViewWithTag<LinearLayout>("detail-actions") ?: return
+        if (actions.childCount == 0 && snapshot.series != null) {
+            val series = snapshot.series
+            val resume = model?.resumePoint(page)
+            val play = navButton(resume?.label ?: "播放第 1 集") {
+                if (resume != null) startPlayer(resume.seriesID, resume.number, resume.start)
+                else startPlayer(page.id, 1, 0.0)
+            }
+            actions.addView(play, LinearLayout.LayoutParams(-1, dp(48)).apply { bottomMargin = dp(8) })
+            val favorite = navButton(if (model?.favorites?.has(page.id) == true) "★ 已收藏" else "☆ 收藏") {}
+            favorite.setOnClickListener {
+                val added = model?.favorites?.toggle(Fav.of(Card.of(series))) == true
+                favorite.text = if (added) "★ 已收藏" else "☆ 收藏"
+                toast(if (added) "已收藏" else "已取消收藏")
+            }
+            actions.addView(favorite, LinearLayout.LayoutParams(-1, dp(48)))
+            play.requestFocus()
+        } else if (actions.childCount == 0 && snapshot.detailError.isNotBlank()) {
+            actions.addView(navButton("重新加载") { model?.loadSeries(page) },
+                LinearLayout.LayoutParams(-1, dp(48)))
+        }
+        val adapter = contentHost.findViewWithTag<RecyclerView>("detail-episodes")?.adapter as? TvEpisodeAdapter
+        adapter?.submit(snapshot.episodes, model?.player?.number ?: 0)
     }
 
     private fun startPlayer(seriesId: String, episode: Int, start: Double) {
@@ -745,10 +906,6 @@ class MainActivity : ComponentActivity() {
 
     private fun showPlayer() {
         renderedScreen = Screen.PLAYER
-        // Stop any hidden feed-prefetch coroutine before handing the screen to the player.
-        composeFeed = null
-        composeFeedUi = null
-        composeDetailUi = null
         shell.visibility = View.GONE
         playerLayer.visibility = View.VISIBLE
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
@@ -925,97 +1082,66 @@ class MainActivity : ComponentActivity() {
 
     private fun buildInfoContent(settings: Boolean) {
         contentHost.removeAllViews()
-        composeFeed = null
-        composeFeedUi = null
-        composeDetailUi = null
-        val view = ComposeView(this).apply {
-            setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnDetachedFromWindowOrReleasedFromPool)
+        val column = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(24), dp(18), dp(24), dp(18))
         }
-        val identity = tvApp.handoffServer
-        val report = if (settings) "" else deviceReport()
-        val details = if (settings) buildList {
-            add("版本" to BuildConfig.VERSION_NAME)
-            add("最低系统" to "Android 6.0 / API 23")
-            add("播放器" to "Media3 ExoPlayer")
-            add("自动检查" to "每 12 小时一次；安装前由系统确认")
-            add("签名" to "hongguoTV 独立签名")
+        header = text(if (settings) "设置" else "设备兼容性诊断", 27f, Color.WHITE, true)
+        column.addView(header, LinearLayout.LayoutParams(-1, dp(50)))
+        if (!settings) {
+            val report = deviceReport()
+            column.addView(text(report, 16f, 0xffd3dbe5.toInt()), LinearLayout.LayoutParams(-1, 0, 1f))
+            column.addView(navButton("复制诊断信息") {
+                val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                clipboard.setPrimaryClip(ClipData.newPlainText("hongguoTV device report", report))
+                toast("诊断信息已复制")
+            }, LinearLayout.LayoutParams(dp(190), dp(48)))
+        } else {
+            val identity = tvApp.handoffServer
+            val handoffLine = identity?.let { "\n接力名称：${it.displayName}\n设备编号：${it.shortCode}" }.orEmpty()
+            column.addView(text("版本：${BuildConfig.VERSION_NAME}\n最低系统：Android 6.0 / API 23\n播放器：Media3 ExoPlayer\n签名：hongguoTV 独立签名$handoffLine",
+                18f, 0xffd3dbe5.toInt()), LinearLayout.LayoutParams(-1, dp(190)))
             if (identity != null) {
-                add("接力名称" to identity.displayName)
-                add("设备编号" to identity.shortCode)
-            }
-        } else emptyList()
-        val actions = if (settings) buildList {
-            if (identity != null) {
-                add(TvInfoAction(
-                    title = "修改电视显示名称",
-                    description = "修改开心果设备列表中显示的电视名称。",
-                    onClick = {
-                        val input = EditText(this@MainActivity).apply {
-                            setSingleLine(true)
-                            setText(identity.displayName)
-                            setSelection(text.length)
-                        }
-                        AlertDialog.Builder(this@MainActivity)
-                            .setTitle("电视显示名称")
-                            .setMessage("这个名称会显示在开心果的电视搜索列表中。")
-                            .setView(input)
-                            .setNegativeButton("取消", null)
-                            .setPositiveButton("保存") { _, _ ->
-                                if (identity.setDisplayName(input.text.toString())) {
-                                    toast("电视名称已更新")
-                                    buildInfoContent(true)
-                                } else {
-                                    toast("名称不能为空")
-                                }
-                            }
-                            .show()
-                    },
-                ))
-            }
-            add(TvInfoAction(
-                title = "清理封面缓存",
-                description = "释放海报图片占用的空间；不会删除收藏和观看历史。",
-                onClick = {
-                    AlertDialog.Builder(this@MainActivity)
-                        .setTitle("清理缓存")
-                        .setMessage("删除封面缓存，不会删除收藏和观看历史。")
+                column.addView(navButton("修改电视显示名称") {
+                    val input = EditText(this).apply {
+                        setSingleLine(true)
+                        setText(identity.displayName)
+                        setSelection(text.length)
+                    }
+                    AlertDialog.Builder(this)
+                        .setTitle("电视显示名称")
+                        .setMessage("这个名称会显示在开心果的电视搜索列表中。")
+                        .setView(input)
                         .setNegativeButton("取消", null)
-                        .setPositiveButton("清理") { _, _ ->
-                            File(cacheDir, "tv-covers").deleteRecursively()
-                            toast("封面缓存已清理")
+                        .setPositiveButton("保存") { _, _ ->
+                            if (identity.setDisplayName(input.text.toString())) {
+                                toast("电视名称已更新")
+                                buildInfoContent(true)
+                            } else {
+                                toast("名称不能为空")
+                            }
                         }
                         .show()
-                },
-            ))
-            add(TvInfoAction(
-                title = "立即检查更新",
-                description = "检查正式 Release；下载完成后由 Android 系统确认安装。",
-                primary = true,
-                onClick = { checkForUpdate(manual = true) },
-            ))
-        } else listOf(
-            TvInfoAction(
-                title = "复制诊断信息",
-                description = "将设备、存储和视频解码器信息复制到剪贴板，方便排查兼容性。",
-                primary = true,
-                onClick = {
-                    val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                    clipboard.setPrimaryClip(ClipData.newPlainText("hongguoTV device report", report))
-                    toast("诊断信息已复制")
-                },
-            ),
-        )
-        view.setContent {
-            TvInfoScreen(
-                title = if (settings) "设置" else "设备兼容性诊断",
-                intro = if (settings) "版本信息、设备接力与缓存管理。" else "检查系统、存储和解码器，定位电视兼容性问题。",
-                details = details,
-                diagnostics = report,
-                actions = actions,
-            )
+                }, LinearLayout.LayoutParams(dp(220), dp(48)))
+            }
+            column.addView(navButton("清理封面缓存") {
+                AlertDialog.Builder(this).setTitle("清理缓存")
+                    .setMessage("删除封面缓存，不会删除收藏和观看历史。")
+                    .setNegativeButton("取消", null)
+                    .setPositiveButton("清理") { _, _ ->
+                        File(cacheDir, "tv-covers").deleteRecursively()
+                        toast("封面缓存已清理")
+                    }.show()
+            }, LinearLayout.LayoutParams(dp(190), dp(48)))
+            column.addView(navButton("立即检查更新") {
+                checkForUpdate(manual = true)
+            }, LinearLayout.LayoutParams(dp(220), dp(48)))
+            column.addView(text("自动检查：每 12 小时一次。下载安装时由系统确认。", 14f, 0xff9eacbd.toInt()),
+                LinearLayout.LayoutParams(-1, dp(34)))
         }
-        contentHost.addView(view, FrameLayout.LayoutParams(-1, -1))
+        contentHost.addView(column, FrameLayout.LayoutParams(-1, -1))
     }
+
 
     private fun checkForUpdate(manual: Boolean) {
         if (checkingForUpdate) {
@@ -1188,13 +1314,11 @@ class MainActivity : ComponentActivity() {
         val page = currentSeries
         return UiSnapshot(
             cards, currentFeed?.loading == true, currentFeed?.error?.let(::friendly).orEmpty(),
-            page?.series, page?.partEpisodes.orEmpty(), page?.loading == true, page?.error?.let(::friendly).orEmpty(),
+            page?.series, page?.episodes.orEmpty(), page?.loading == true, page?.error?.let(::friendly).orEmpty(),
             m.player.state, m.player.number, m.player.speed, m.player.quality, m.player.qualities,
             m.favorites.list.size, m.history.list.size,
             m.chartContents, m.rankBoards, m.rankContent, m.rankBoard, m.currentRankContent,
             m.newDates, m.newDate,
-            page?.part ?: 0, page?.parts.orEmpty(),
-            if (page != null && m.player.seriesID == page.id) m.player.number else 0,
         )
     }
 
@@ -1238,21 +1362,13 @@ class MainActivity : ComponentActivity() {
                 screen = parentScreen
                 currentSeries = null
                 showShell()
+                currentFeed?.let { feed -> scheduleInitialFeedPrefill(screen, feed) }
             }
             Screen.SEARCH -> {
                 screen = searchReturnScreen
-                headerTitle = when (screen) {
-                    Screen.HOME -> "推荐"
-                    Screen.RANK -> "排行榜"
-                    Screen.NEW -> "新剧上线"
-                    Screen.FAVORITES -> "我的收藏"
-                    Screen.HISTORY -> "观看历史"
-                    Screen.DEVICE -> "设备兼容性诊断"
-                    Screen.SETTINGS -> "设置"
-                    else -> headerTitle
-                }
                 currentFeed = feedFor(searchReturnScreen)
                 showShell()
+                currentFeed?.let { feed -> scheduleInitialFeedPrefill(screen, feed) }
             }
             Screen.HOME -> super.onBackPressed()
             else -> enterFeed(Screen.HOME)
@@ -1364,7 +1480,7 @@ class MainActivity : ComponentActivity() {
         }
 
     private fun buttonBackground(focused: Boolean, selected: Boolean = false) = GradientDrawable().apply {
-        cornerRadius = dp(10).toFloat()
+        cornerRadius = dp(8).toFloat()
         setColor(when {
             focused -> 0xff34465a.toInt()
             selected -> 0xff1d382f.toInt()
@@ -1386,6 +1502,9 @@ class MainActivity : ComponentActivity() {
             if (bold) typeface = Typeface.DEFAULT_BOLD
             gravity = Gravity.CENTER_VERTICAL
         }
+
+    private fun gridColumns(): Int =
+        (resources.displayMetrics.widthPixels / resources.displayMetrics.density / 190).toInt().coerceIn(4, 7)
 
     private fun dp(value: Int) = (value * resources.displayMetrics.density).toInt()
 
