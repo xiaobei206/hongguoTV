@@ -121,7 +121,7 @@ internal fun TvFeedScreen(
         // One coroutine coordinates first-screen fill and scrolling. This avoids
         // competing prefetch loops and caps consecutive empty batches while still
         // walking cursor-advancing pages far enough to find sparse valid results.
-        LaunchedEffect(feed, state.feedKey, gridState, columns, paginationEpoch) {
+        LaunchedEffect(feed, state.feedKey, gridState, columns, paginationEpoch, state.error) {
             val source = feed ?: return@LaunchedEffect
             var rounds = 0
             var emptyBatches = 0
