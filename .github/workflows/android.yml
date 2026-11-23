@@ -83,6 +83,18 @@ jobs:
           chmod +x gradlew
           ./gradlew --no-daemon testDebugUnitTest lintRelease assembleRelease
 
+      - name: Print Android Lint diagnostics when present
+        if: always()
+        shell: bash
+        run: |
+          REPORT="app/build/intermediates/lint_intermediate_text_report/release/lintReportRelease/lint-results-release.txt"
+          if [[ -f "$REPORT" ]]; then
+            echo "===== Android Lint diagnostics ====="
+            sed -n '1,240p' "$REPORT"
+          else
+            echo "No Android Lint text report was generated."
+          fi
+
       - name: Verify package metadata and APK signature
         id: verify
         shell: bash
