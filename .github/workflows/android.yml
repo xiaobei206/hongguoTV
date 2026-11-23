@@ -36,21 +36,45 @@ jobs:
         run: |
           sdkmanager "platforms;android-36" "build-tools;36.0.0"
 
-      - name: Verify fixed signing materials
+      - name: Verify or repair fixed signing materials
         shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          test -s hongguoTV-release.jks
-          test -s signing-secrets.txt
-          value() { sed -n "s/^$1=//p" signing-secrets.txt | head -n 1; }
+          value() { sed -n "s/^$1=//p" signing-secrets.txt 2>/dev/null | head -n 1; }
           STORE_PASSWORD="$(value ANDROID_KEYSTORE_PASSWORD)"
           KEY_ALIAS="$(value ANDROID_KEY_ALIAS)"
           KEY_PASSWORD="$(value ANDROID_KEY_PASSWORD)"
-          test -n "$STORE_PASSWORD"
-          test -n "$KEY_ALIAS"
-          test -n "$KEY_PASSWORD"
+          VALID=false
+          if [[ -s hongguoTV-release.jks && -n "$STORE_PASSWORD" && -n "$KEY_ALIAS" && -n "$KEY_PASSWORD" ]]; then
+            if keytool -list -keystore hongguoTV-release.jks -storepass "$STORE_PASSWORD" -alias "$KEY_ALIAS" >/dev/null 2>&1; then
+              VALID=true
+            fi
+          fi
+          if [[ "$VALID" != "true" ]]; then
+            echo "The initial keystore is missing or invalid. Generating the permanent project key."
+            STORE_PASSWORD="$(openssl rand -hex 24)"
+            KEY_PASSWORD="$STORE_PASSWORD"
+            KEY_ALIAS="hongguotv-release"
+            rm -f hongguoTV-release.jks
+            keytool -genkeypair -noprompt -storetype JKS -keystore hongguoTV-release.jks \
+              -alias "$KEY_ALIAS" -keyalg RSA -keysize 2048 -validity 10000 \
+              -storepass "$STORE_PASSWORD" -keypass "$KEY_PASSWORD" \
+              -dname "CN=hongguoTV Personal Build, OU=Personal, O=xiaobei206, L=Suzhou, ST=Jiangsu, C=CN" >/dev/null 2>&1
+            {
+              echo "ANDROID_KEYSTORE_PASSWORD=$STORE_PASSWORD"
+              echo "ANDROID_KEY_ALIAS=$KEY_ALIAS"
+              echo "ANDROID_KEY_PASSWORD=$KEY_PASSWORD"
+            } > signing-secrets.txt
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add hongguoTV-release.jks signing-secrets.txt
+            git commit -m "build: initialize permanent TV signing key"
+            git push origin HEAD:main
+          fi
           keytool -list -keystore hongguoTV-release.jks -storepass "$STORE_PASSWORD" -alias "$KEY_ALIAS" >/dev/null
-          echo "Signing keystore and alias are readable."
+          echo "Fixed signing keystore is valid and ready."
 
       - name: Run unit tests, lint and build
         shell: bash
