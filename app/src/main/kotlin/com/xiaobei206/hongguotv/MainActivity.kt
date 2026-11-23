@@ -54,6 +54,7 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
 import java.io.File
 
+@androidx.media3.common.util.UnstableApi
 class MainActivity : ComponentActivity() {
     private enum class Screen { HOME, RANK, NEW, SEARCH, FAVORITES, HISTORY, DETAIL, PLAYER, DEVICE, SETTINGS }
 

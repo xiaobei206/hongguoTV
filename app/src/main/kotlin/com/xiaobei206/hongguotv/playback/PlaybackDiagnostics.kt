@@ -1,5 +1,3 @@
-@file:OptIn(androidx.media3.common.util.UnstableApi::class)
-
 package com.xiaobei206.hongguotv.playback
 
 import android.media.MediaCodecList
@@ -12,6 +10,7 @@ import androidx.media3.datasource.TransferListener
 import java.util.TreeMap
 
 /** Network graphs are sampled from actual CDN HTTP transfers beneath CencDataSource. */
+@androidx.media3.common.util.UnstableApi
 object PlaybackDiagnostics : TransferListener {
     data class Snapshot(
         val connectionSpeedBps: Long, val networkSamples: List<Long>,

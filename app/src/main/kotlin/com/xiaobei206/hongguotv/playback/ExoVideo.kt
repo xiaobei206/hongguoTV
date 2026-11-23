@@ -1,5 +1,3 @@
-@file:OptIn(androidx.media3.common.util.UnstableApi::class)
-
 package com.xiaobei206.hongguotv.playback
 
 import android.content.Context
@@ -31,6 +29,7 @@ import androidx.compose.runtime.setValue
  * [CencDataSource]. It is made once, for the whole app: the player's
  * screen, picture in picture and the media session all show the same one.
  */
+@androidx.media3.common.util.UnstableApi
 class ExoVideo(context: Context, registry: StreamRegistry, http: DataSource.Factory) : Video {
     val exo: ExoPlayer = ExoPlayer.Builder(context)
         .setRenderersFactory(
