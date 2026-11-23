@@ -765,6 +765,9 @@ class MainActivity : ComponentActivity() {
 
     private fun showPlayer() {
         renderedScreen = Screen.PLAYER
+        // Stop any hidden feed-prefetch coroutine before handing the screen to the player.
+        composeFeed = null
+        composeFeedUi = null
         shell.visibility = View.GONE
         playerLayer.visibility = View.VISIBLE
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
