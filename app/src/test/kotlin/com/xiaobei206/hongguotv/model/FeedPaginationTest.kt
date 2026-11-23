@@ -147,7 +147,7 @@ class FeedPaginationTest {
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
         val feed = Feed.of(scope, listOf(
             Card("a", "原始标题"),
-            Card("b", "已有封面", cover = "existing.jpg", sub = "12 集"),
+            Card("b", "已有封面", cover = "existing.jpg", sub = "12 集", episodes = 12),
         ))
 
         try {
