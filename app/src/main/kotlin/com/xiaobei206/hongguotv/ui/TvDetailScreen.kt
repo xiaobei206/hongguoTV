@@ -227,7 +227,7 @@ internal fun TvDetailScreen(
                     state.episodes.isNotEmpty() -> {
                         LazyVerticalGrid(
                             columns = GridCells.Fixed(8),
-                            modifier = Modifier.fillMaxSize(),
+                            modifier = Modifier.fillMaxWidth().weight(1f),
                             contentPadding = PaddingValues(bottom = 18.dp, end = 6.dp),
                             verticalArrangement = Arrangement.spacedBy(10.dp),
                             horizontalArrangement = Arrangement.spacedBy(10.dp),
@@ -243,13 +243,13 @@ internal fun TvDetailScreen(
                         }
                     }
                     state.loading -> {
-                        DetailEmptyState("正在加载剧集列表…", secondary = "稍等片刻，剧集会显示在这里")
+                        DetailEmptyState("正在加载剧集列表…", secondary = "稍等片刻，剧集会显示在这里", modifier = Modifier.weight(1f))
                     }
                     state.error.isNotBlank() -> {
-                        DetailEmptyState(state.error, secondary = "可返回重试或重新进入详情")
+                        DetailEmptyState(state.error, secondary = "可返回重试或重新进入详情", modifier = Modifier.weight(1f))
                     }
                     else -> {
-                        DetailEmptyState("尚无可显示的剧集", secondary = "请检查网络或稍后重试")
+                        DetailEmptyState("尚无可显示的剧集", secondary = "请检查网络或稍后重试", modifier = Modifier.weight(1f))
                     }
                 }
             }
@@ -446,8 +446,8 @@ private fun DetailEpisodeTile(
 }
 
 @Composable
-private fun DetailEmptyState(label: String, secondary: String) {
-    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+private fun DetailEmptyState(label: String, secondary: String, modifier: Modifier = Modifier) {
+    Box(modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
         Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text(
                 text = label,
