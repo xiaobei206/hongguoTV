@@ -10,7 +10,7 @@
 
 ### 分页与原生库兼容
 - 每批分页可在游标持续前进时有界跳过更多空页/重复页；滚动接近列表底部后，若连续批次没有新卡片，会自动继续请求，不依赖用户再次滚动触发。
-- CI 改用 Android NDK r28.2，并对 APK 内所有 ELF LOAD 段执行 16 KB 对齐检查，同时检查 APK 内原生库 ZIP 对齐；未达到要求则构建失败。
+- CI 固定使用修复后的 openhongguo SDK 提交，gomobile 改用 NDK 外部链接器并传入 16 KB max/common page-size 参数；同时对 APK 内所有 ELF LOAD 段执行 16 KB 对齐检查，并检查原生库 ZIP 对齐，未达到要求则构建失败。
 
 ### 验证说明
 - 新增长空页分页回归测试；CI 执行 SDK 测试、TV 单元测试、Lint、Release 构建和 16 KB 原生库检查。

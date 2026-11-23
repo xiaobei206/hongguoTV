@@ -26,7 +26,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: xiaobei206/openhongguo
-          ref: main
+          ref: 1e9334185a46033bcc4e3e30fc41f649958b1389
           path: .build/openhongguo
 
       - name: Checkout audited Android diagnostics patch
@@ -70,6 +70,9 @@ jobs:
           gomobile init
           cd bindings/mobile
           chmod +x build.sh
+          grep -F -- '-linkmode=external' build.sh
+          grep -F -- '-z,max-page-size=16384' build.sh
+          grep -F -- '-z,common-page-size=16384' build.sh
           ./build.sh android
           test -s android/build/outputs/aar/openhongguo-release.aar
 
