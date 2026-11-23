@@ -40,6 +40,8 @@ import com.xiaobei206.hongguotv.ui.TvFeedFilterChoice
 import com.xiaobei206.hongguotv.ui.TvFeedFilterRow
 import com.xiaobei206.hongguotv.ui.TvFeedScreen
 import com.xiaobei206.hongguotv.ui.TvFeedUiState
+import com.xiaobei206.hongguotv.ui.TvDetailScreen
+import com.xiaobei206.hongguotv.ui.TvDetailUiState
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
@@ -93,6 +95,7 @@ class MainActivity : ComponentActivity() {
     private var renderedScreen: Screen? = null
     private var composeFeed by mutableStateOf<Feed?>(null)
     private var composeFeedUi by mutableStateOf<TvFeedUiState?>(null)
+    private var composeDetailUi by mutableStateOf<TvDetailUiState?>(null)
 
     private lateinit var shell: LinearLayout
     private lateinit var rail: LinearLayout
@@ -152,6 +155,9 @@ class MainActivity : ComponentActivity() {
         val currentRankContent: String,
         val newDates: List<String>,
         val newDate: String,
+        val detailPart: Int = 0,
+        val detailParts: List<String> = emptyList(),
+        val currentEpisodeNumber: Int = 0,
     )
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -489,102 +495,63 @@ class MainActivity : ComponentActivity() {
 
     private fun buildDetailContent() {
         contentHost.removeAllViews()
-        val layout = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        val leftScroll = ScrollView(this).apply { isFillViewport = true }
-        val left = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(20), dp(14), dp(20), dp(20))
+        composeDetailUi = null
+        val view = ComposeView(this).apply {
+            setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnViewTreeLifecycleDestroyed)
         }
-        header = text("剧集详情", 26f, Color.WHITE, true)
-        left.addView(header, LinearLayout.LayoutParams(-1, dp(48)))
-        subHeader = text("正在读取剧集信息…", 15f, 0xffa7b2c2.toInt())
-        left.addView(subHeader, LinearLayout.LayoutParams(-1, dp(38)))
-        val poster = ImageView(this).apply {
-            scaleType = ImageView.ScaleType.CENTER_CROP
-            tag = "detail-cover"
-            setBackgroundColor(0xff243449.toInt())
-        }
-        left.addView(poster, LinearLayout.LayoutParams(dp(170), dp(230)).apply {
-            topMargin = dp(12); bottomMargin = dp(12)
-        })
-        left.addView(text("剧情简介", 19f, Color.WHITE, true))
-        val description = text("", 15f, 0xffd2d9e2.toInt()).apply {
-            tag = "detail-description"
-            maxLines = 7
-            ellipsize = android.text.TextUtils.TruncateAt.END
-        }
-        left.addView(description, LinearLayout.LayoutParams(-1, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
-            topMargin = dp(6); bottomMargin = dp(14)
-        })
-        val actions = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            tag = "detail-actions"
-        }
-        left.addView(actions, LinearLayout.LayoutParams(-1, ViewGroup.LayoutParams.WRAP_CONTENT))
-        leftScroll.addView(left, FrameLayout.LayoutParams(-1, ViewGroup.LayoutParams.WRAP_CONTENT))
-
-        val right = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(12), dp(16), dp(12), dp(12))
-        }
-        right.addView(text("选择剧集", 22f, Color.WHITE, true), LinearLayout.LayoutParams(-1, dp(48)))
-        right.addView(text("方向键移动 · 确认播放 · 返回上一页", 13f, 0xffa7b2c2.toInt()),
-            LinearLayout.LayoutParams(-1, dp(28)))
-        val episodes = RecyclerView(this).apply {
-            tag = "detail-episodes"
-            layoutManager = GridLayoutManager(this@MainActivity, 8)
-            adapter = TvEpisodeAdapter(this@MainActivity) { episode ->
-                val id = currentSeries?.id ?: return@TvEpisodeAdapter
-                if (episode.playable) startPlayer(id, episode.number, 0.0) else toast("这一集暂不可播放")
+        contentHost.addView(view, FrameLayout.LayoutParams(-1, -1))
+        view.setContent {
+            val detail = composeDetailUi
+            if (detail != null) {
+                TvDetailScreen(
+                    state = detail,
+                    artwork = tvApp.artwork,
+                    onPlay = {
+                        val page = currentSeries
+                        if (page != null) {
+                            val resume = model?.resumePoint(page)
+                            if (resume != null) startPlayer(resume.seriesID, resume.number, resume.start)
+                            else startPlayer(page.id, 1, 0.0)
+                        }
+                    },
+                    onFavorite = {
+                        val page = currentSeries
+                        val series = page?.series
+                        if (page != null && series != null) {
+                            val added = model?.favorites?.toggle(Fav.of(Card.of(series))) == true
+                            toast(if (added) "已收藏" else "已取消收藏")
+                        }
+                    },
+                    onEpisodeSelected = { episode ->
+                        val page = currentSeries
+                        if (page != null) {
+                            if (episode.playable) startPlayer(page.id, episode.number, 0.0)
+                            else toast("这一集暂不可播放")
+                        }
+                    },
+                    onPartSelected = { part -> currentSeries?.part = part },
+                    onRetry = { currentSeries?.let { model?.loadSeries(it, force = true) } },
+                )
             }
-            setHasFixedSize(true)
-            setItemViewCacheSize(8)
-            overScrollMode = View.OVER_SCROLL_NEVER
         }
-        right.addView(episodes, LinearLayout.LayoutParams(-1, 0, 1f))
-        layout.addView(leftScroll, LinearLayout.LayoutParams(0, -1, 4f))
-        layout.addView(right, LinearLayout.LayoutParams(0, -1, 6f))
-        contentHost.addView(layout, FrameLayout.LayoutParams(-1, -1))
     }
 
     private fun renderDetail(snapshot: UiSnapshot) {
         val page = currentSeries ?: return
-        header.text = snapshot.series?.title ?: "剧集详情"
-        subHeader.text = when {
-            snapshot.series != null -> metaLine(snapshot.series)
-            snapshot.detailError.isNotBlank() -> snapshot.detailError
-            else -> "正在加载剧集信息…"
-        }
-        val description = contentHost.findViewWithTag<TextView>("detail-description")
-        description?.text = snapshot.series?.description.orEmpty()
-        val poster = contentHost.findViewWithTag<ImageView>("detail-cover")
-        if (snapshot.series != null && poster != null && poster.tag != snapshot.series.coverUrl) {
-            poster.tag = snapshot.series.coverUrl
-            tvApp.artwork.load(snapshot.series.coverUrl, poster)
-        }
-        val actions = contentHost.findViewWithTag<LinearLayout>("detail-actions") ?: return
-        if (actions.childCount == 0 && snapshot.series != null) {
-            val series = snapshot.series
-            val resume = model?.resumePoint(page)
-            val play = navButton(resume?.label ?: "播放第 1 集") {
-                if (resume != null) startPlayer(resume.seriesID, resume.number, resume.start)
-                else startPlayer(page.id, 1, 0.0)
-            }
-            actions.addView(play, LinearLayout.LayoutParams(-1, dp(48)).apply { bottomMargin = dp(8) })
-            val favorite = navButton(if (model?.favorites?.has(page.id) == true) "★ 已收藏" else "☆ 收藏") {}
-            favorite.setOnClickListener {
-                val added = model?.favorites?.toggle(Fav.of(Card.of(series))) == true
-                favorite.text = if (added) "★ 已收藏" else "☆ 收藏"
-                toast(if (added) "已收藏" else "已取消收藏")
-            }
-            actions.addView(favorite, LinearLayout.LayoutParams(-1, dp(48)))
-            play.requestFocus()
-        } else if (actions.childCount == 0 && snapshot.detailError.isNotBlank()) {
-            actions.addView(navButton("重新加载") { model?.loadSeries(page) },
-                LinearLayout.LayoutParams(-1, dp(48)))
-        }
-        val adapter = contentHost.findViewWithTag<RecyclerView>("detail-episodes")?.adapter as? TvEpisodeAdapter
-        adapter?.submit(snapshot.episodes, model?.player?.number ?: 0)
+        val resume = model?.resumePoint(page)
+        composeDetailUi = TvDetailUiState(
+            seriesId = page.id,
+            series = snapshot.series,
+            meta = snapshot.series?.let(::metaLine).orEmpty(),
+            resumeLabel = resume?.label ?: "播放第 1 集",
+            episodes = snapshot.episodes,
+            partLabels = snapshot.detailParts,
+            selectedPart = snapshot.detailPart,
+            currentEpisodeNumber = snapshot.currentEpisodeNumber,
+            favorite = model?.favorites?.has(page.id) == true,
+            loading = snapshot.detailLoading,
+            error = snapshot.detailError,
+        )
     }
 
     private fun startPlayer(seriesId: String, episode: Int, start: Double) {
@@ -768,6 +735,7 @@ class MainActivity : ComponentActivity() {
         // Stop any hidden feed-prefetch coroutine before handing the screen to the player.
         composeFeed = null
         composeFeedUi = null
+        composeDetailUi = null
         shell.visibility = View.GONE
         playerLayer.visibility = View.VISIBLE
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
@@ -1176,11 +1144,13 @@ class MainActivity : ComponentActivity() {
         val page = currentSeries
         return UiSnapshot(
             cards, currentFeed?.loading == true, currentFeed?.error?.let(::friendly).orEmpty(),
-            page?.series, page?.episodes.orEmpty(), page?.loading == true, page?.error?.let(::friendly).orEmpty(),
+            page?.series, page?.partEpisodes.orEmpty(), page?.loading == true, page?.error?.let(::friendly).orEmpty(),
             m.player.state, m.player.number, m.player.speed, m.player.quality, m.player.qualities,
             m.favorites.list.size, m.history.list.size,
             m.chartContents, m.rankBoards, m.rankContent, m.rankBoard, m.currentRankContent,
             m.newDates, m.newDate,
+            page?.part ?: 0, page?.parts.orEmpty(),
+            if (page != null && m.player.seriesID == page.id) m.player.number else 0,
         )
     }
 
