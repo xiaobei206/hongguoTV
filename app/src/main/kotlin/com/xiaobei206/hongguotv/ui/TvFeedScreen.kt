@@ -59,9 +59,7 @@ import androidx.compose.ui.Alignment
 import com.xiaobei206.hongguotv.TvArtworkLoader
 import com.xiaobei206.hongguotv.model.Card
 import com.xiaobei206.hongguotv.model.Feed
-import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.math.max
 
@@ -257,7 +255,7 @@ internal fun TvFeedScreen(
 
             if (state.cards.isEmpty()) {
                 Box(
-                    modifier = Modifier.fillMaxSize(),
+                    modifier = Modifier.fillMaxWidth().weight(1f),
                     contentAlignment = Alignment.Center,
                 ) {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
