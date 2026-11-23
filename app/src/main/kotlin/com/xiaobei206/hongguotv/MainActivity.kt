@@ -86,6 +86,7 @@ class MainActivity : ComponentActivity() {
     private var searchReturnScreen = Screen.HOME
     private var currentFeed: Feed? = null
     private var currentSeries: SeriesPage? = null
+    private var detailRevealPendingId: String? = null
     private var headerTitle = "推荐"
     private var renderedScreen: Screen? = null
     private var composeFeed by mutableStateOf<Feed?>(null)
@@ -492,6 +493,7 @@ class MainActivity : ComponentActivity() {
         val m = model ?: return
         parentScreen = screen
         currentSeries = m.seriesPage(card.id, restartIfLoading = true)
+        detailRevealPendingId = card.id
         screen = Screen.DETAIL
         showShell()
     }
@@ -541,6 +543,10 @@ class MainActivity : ComponentActivity() {
 
     private fun renderDetail(snapshot: UiSnapshot) {
         val page = currentSeries ?: return
+        if (detailRevealPendingId == page.id && snapshot.series != null && snapshot.episodes.isNotEmpty()) {
+            model?.resumePoint(page)?.let { page.reveal(it.number) }
+            detailRevealPendingId = null
+        }
         val resume = model?.resumePoint(page)
         composeDetailUi = TvDetailUiState(
             seriesId = page.id,
