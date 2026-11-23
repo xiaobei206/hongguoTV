@@ -114,8 +114,9 @@ internal fun TvFeedScreen(
             .background(TvColors.background)
             .padding(start = 22.dp, end = 24.dp, top = 14.dp, bottom = 14.dp),
     ) {
-        val columns = (maxWidth / 166.dp).toInt().coerceIn(3, 7)
-        val initialTarget = max(30, columns * 4)
+        val columns = (maxWidth / 190.dp).toInt().coerceIn(3, 7)
+        val estimatedVisibleRows = (maxHeight / 295.dp).toInt().coerceAtLeast(2)
+        val initialTarget = (columns * estimatedVisibleRows * 2).coerceIn(20, 40)
 
         var paginationEpoch by remember(feed, state.feedKey) { mutableIntStateOf(0) }
         var sparseBatchesPaused by remember(feed, state.feedKey) { mutableStateOf(false) }
