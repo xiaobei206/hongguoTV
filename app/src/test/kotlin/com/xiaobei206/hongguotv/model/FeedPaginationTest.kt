@@ -85,6 +85,29 @@ class FeedPaginationTest {
         }
     }
     @Test
+    fun defaultBatchAccumulatesTwentyUniqueCards() {
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
+        val requested = mutableListOf<String>()
+        val feed = Feed(scope) { cursor ->
+            requested += cursor
+            val pageNumber = requested.size
+            val pageCards = (0 until 5).map { offset ->
+                val id = (pageNumber - 1) * 5 + offset
+                Card("card-$id", "作品 $id")
+            }
+            FeedPage(pageCards, cursor = "cursor-$pageNumber", more = true)
+        }
+
+        try {
+            feed.loadMore()
+            assertEquals(4, requested.size)
+            assertEquals(20, feed.cards.size)
+            assertTrue(feed.wantsMore)
+        } finally {
+            scope.cancel()
+        }
+    }
+    @Test
     fun stopsWhenServerClaimsMoreButDoesNotAdvanceCursor() {
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
         var requests = 0
