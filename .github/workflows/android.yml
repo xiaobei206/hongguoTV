@@ -165,8 +165,8 @@ jobs:
           name: 红果 TV v${{ steps.version.outputs.version }}
           body_path: CHANGELOG.md
           files: |
-            dist/hongguoTV-v1.0.0-universal.apk
-            dist/hongguoTV-v1.0.0-SHA256SUMS.txt
+            dist/hongguoTV-v${{ steps.version.outputs.version }}-universal.apk
+            dist/hongguoTV-v${{ steps.version.outputs.version }}-SHA256SUMS.txt
           draft: false
           prerelease: false
           fail_on_unmatched_files: true
