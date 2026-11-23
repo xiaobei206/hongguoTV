@@ -46,11 +46,9 @@ class Feed(
     /** Sorts the cards after each page, when set. */
     internal var order: ((List<Card>) -> List<Card>)? = null
 
-    internal fun add(p: FeedPage) {
+    internal fun add(p: FeedPage, requestCursor: String = cursor): Int {
         var incoming = p.cards
         if (stale) {
-            // Fresh series first, then those of the cache, so the grid
-            // never shrinks under the viewer.
             incoming = incoming + cards
             cards = emptyList()
             seen = HashSet()
@@ -65,12 +63,17 @@ class Feed(
             }
         }
         cursor = p.cursor
-        more = p.more
-        // Search pages repeat what came before: a page with nothing new
-        // ends the feed, or the grid would ask for more forever.
-        if (added == 0 && p.cards.isNotEmpty()) more = false
+        val cursorAdvanced = p.cursor.isNotBlank() && p.cursor != requestCursor
+        more = p.more && cursorAdvanced
+        if (p.more && !cursorAdvanced) {
+            debugLog {
+                "feed pagination stopped: cursor did not advance requestLength=${requestCursor.length} " +
+                    "responseLength=${p.cursor.length} pageCards=${p.cards.size} added=$added"
+            }
+        }
         order?.let { list = ArrayList(it(list)) }
         cards = list
+        return added
     }
 
     /** Whether the grid should ask for the next page. */
@@ -86,24 +89,36 @@ class Feed(
         if (error != null && System.nanoTime() - errorAt < 5_000_000_000L) return
         loading = true
         started = true
-        val cursor = if (stale) "" else this.cursor
+        var requestCursor = if (stale) "" else this.cursor
         scope.launch {
+            var fetchedPages = 0
             try {
-                val p = fetch(cursor)
-                loading = false
+                while (fetchedPages < 4) {
+                    val requested = requestCursor
+                    val page = fetch(requested)
+                    val added = add(page, requestCursor = requested)
+                    fetchedPages++
+                    onPage?.invoke(page)
+                    val cursorAdvanced = page.cursor.isNotBlank() && page.cursor != requested
+                    debugLog {
+                        "feed page requestCursorLength=${requested.length} responseCursorLength=${page.cursor.length} " +
+                            "cursorAdvanced=$cursorAdvanced rawCards=${page.cards.size} added=$added " +
+                            "total=${cards.size} hasMore=${page.more} batchPage=$fetchedPages"
+                    }
+                    if (!more || added > 0 || !cursorAdvanced) break
+                    requestCursor = page.cursor
+                }
                 error = null
                 tries = 0
-                add(p)
-                onPage?.invoke(p)
             } catch (e: CancellationException) {
-                loading = false
                 throw e
             } catch (e: Exception) {
-                loading = false
                 error = e
                 errorAt = System.nanoTime()
-                debugLog { "feed: $e" }
+                debugLog { "feed batch failed after $fetchedPages page(s): $e" }
                 scheduleRetry()
+            } finally {
+                loading = false
             }
         }
     }
@@ -157,7 +172,7 @@ class Feed(
             }
             error = null
             tries = 0
-            add(p)
+            add(p, requestCursor = "")
             if (merging && had) {
                 // The grid goes on from where it had got to, not from the
                 // fresh page's second.

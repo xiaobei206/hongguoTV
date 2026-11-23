@@ -194,6 +194,24 @@ jobs:
             echo "exists=false" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Prepare version-specific release notes
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.release_check.outputs.exists == 'false'
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.version.outputs.version }}"
+          mkdir -p dist
+          awk -v version="$VERSION" '
+            index($0, "## [" version "]") == 1 { printing=1; print; next }
+            printing && /^## \[/ { exit }
+            printing { print }
+          ' CHANGELOG.md > dist/release-notes.md
+          if ! grep -Fq "## [$VERSION]" dist/release-notes.md; then
+            echo "Missing CHANGELOG section for $VERSION" >&2
+            exit 1
+          fi
+          test -s dist/release-notes.md
+
       - name: Publish hongguoTV release
         if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.release_check.outputs.exists == 'false'
         uses: softprops/action-gh-release@v2
@@ -201,7 +219,7 @@ jobs:
           tag_name: v${{ steps.version.outputs.version }}
           target_commitish: main
           name: 红果 TV v${{ steps.version.outputs.version }}
-          body_path: CHANGELOG.md
+          body_path: dist/release-notes.md
           files: |
             dist/hongguoTV-v${{ steps.version.outputs.version }}-universal.apk
             dist/hongguoTV-v${{ steps.version.outputs.version }}-SHA256SUMS.txt

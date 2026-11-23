@@ -1,4 +1,4 @@
-name: Sync published release notes
+name: Normalize published release notes
 
 on:
   push:
@@ -10,25 +10,35 @@ permissions:
 
 jobs:
   sync:
-    name: Refresh notes for the current published version
+    name: Keep each release body limited to its own version
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Update the published release body when the tag exists
+      - name: Normalize all published release bodies
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          VERSION="$(sed -n 's/.*versionName = "\([^"]*\)".*/\1/p' app/build.gradle.kts | head -n 1)"
-          test -n "$VERSION"
-          TAG="v$VERSION"
-          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" \
-              --title "红果 TV $TAG" --notes-file CHANGELOG.md
-            echo "Updated published release notes for $TAG"
-          else
-            echo "Release $TAG does not exist yet; the publish workflow will use CHANGELOG.md."
-          fi
+          NOTES="$(mktemp)"
+          trap 'rm -f "$NOTES"' EXIT
+          gh release list --repo "$GITHUB_REPOSITORY" --limit 100 --json tagName --jq '.[].tagName' |
+          while IFS= read -r TAG; do
+            [[ "$TAG" == v* ]] || continue
+            VERSION="${TAG#v}"
+            awk -v version="$VERSION" '
+              index($0, "## [" version "]") == 1 { printing=1; print; next }
+              printing && /^## \[/ { exit }
+              printing { print }
+            ' CHANGELOG.md > "$NOTES"
+
+            if ! grep -Fq "## [$VERSION]" "$NOTES"; then
+              echo "No matching CHANGELOG section for $TAG; leaving its release body unchanged."
+              continue
+            fi
+
+            gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --title "红果 TV $TAG" --notes-file "$NOTES"
+            echo "Normalized release notes for $TAG"
+          done

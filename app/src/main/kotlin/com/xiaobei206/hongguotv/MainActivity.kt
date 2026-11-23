@@ -106,6 +106,7 @@ class MainActivity : ComponentActivity() {
     private var progressTask: Runnable? = null
     private val hideControls = Runnable {
         if (screen == Screen.PLAYER && model?.player?.paused == false) {
+            if (playerControls.findFocus() != null) playerView.requestFocus()
             playerControls.visibility = View.GONE
         }
     }
@@ -138,7 +139,7 @@ class MainActivity : ComponentActivity() {
             showStartupError(tvApp.startupError)
             return
         }
-        cardAdapter = TvCardAdapter(this, tvApp.artwork, ::openDetail) { card ->
+        cardAdapter = TvCardAdapter(this, tvApp.artwork, ::onCardSelected) { card ->
             val added = m.favorites.toggle(Fav.of(card))
             toast(if (added) "已收藏：${card.title}" else "已取消收藏：${card.title}")
         }
@@ -167,7 +168,7 @@ class MainActivity : ComponentActivity() {
             setPadding(dp(12), dp(18), dp(10), dp(12))
             setBackgroundColor(0xff101925.toInt())
         }
-        rail.addView(text("红果 TV", 24f, 0xffffb45c.toInt(), true), LinearLayout.LayoutParams(-1, dp(64)))
+        rail.addView(text("开心果 · TV", 26f, 0xff72dba0.toInt(), true), LinearLayout.LayoutParams(-1, dp(68)))
         addNav("首页", Screen.HOME)
         addNav("排行榜", Screen.RANK)
         addNav("新剧上线", Screen.NEW)
@@ -177,8 +178,8 @@ class MainActivity : ComponentActivity() {
         rail.addView(View(this), LinearLayout.LayoutParams(1, 0, 1f))
         addNav("设备信息", Screen.DEVICE)
         addNav("设置", Screen.SETTINGS)
-        contentHost = FrameLayout(this).apply { setPadding(dp(10), dp(6), dp(18), dp(10)) }
-        shell.addView(rail, LinearLayout.LayoutParams(dp(170), -1))
+        contentHost = FrameLayout(this).apply { setPadding(dp(14), dp(8), dp(22), dp(12)) }
+        shell.addView(rail, LinearLayout.LayoutParams(dp(190), -1))
         shell.addView(contentHost, LinearLayout.LayoutParams(0, -1, 1f))
         root.addView(shell, FrameLayout.LayoutParams(-1, -1))
         playerLayer = FrameLayout(this).apply {
@@ -192,7 +193,8 @@ class MainActivity : ComponentActivity() {
 
     private fun addNav(label: String, target: Screen, action: (() -> Unit)? = null) {
         val button = navButton(label) { if (action != null) action() else navigate(target) }
-        rail.addView(button, LinearLayout.LayoutParams(-1, dp(52)))
+        button.tag = target
+        rail.addView(button, LinearLayout.LayoutParams(-1, dp(56)))
     }
 
     private fun navigate(target: Screen) {
@@ -234,6 +236,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun showShell() {
+        updateNavigationSelection()
         shell.visibility = View.VISIBLE
         playerLayer.visibility = View.GONE
         window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
@@ -259,7 +262,7 @@ class MainActivity : ComponentActivity() {
         top.addView(navButton("搜索") { openSearchDialog() }, LinearLayout.LayoutParams(dp(90), dp(42)))
         top.addView(navButton("刷新") { refreshCurrentFeed() }, LinearLayout.LayoutParams(dp(90), dp(42)))
         column.addView(top)
-        subHeader = text("遥控器方向键选择 · 确认打开详情 · 长按海报收藏", 14f, 0xffa7b2c2.toInt())
+        subHeader = text("方向键移动 · 确认打开 · 长按收藏", 16f, 0xffa7b2c2.toInt())
         column.addView(subHeader, LinearLayout.LayoutParams(-1, dp(30)))
         recycler = RecyclerView(this).apply {
             layoutManager = GridLayoutManager(this@MainActivity, gridColumns())
@@ -308,30 +311,38 @@ class MainActivity : ComponentActivity() {
         feedPrefillJob?.cancel()
         recycler.post {
             if (screen != target || currentFeed !== feed) return@post
-            val rowExtent = dp(256).coerceAtLeast(1)
+            val rowExtent = dp(282).coerceAtLeast(1)
             val visibleRows = ceil(recycler.height.toDouble() / rowExtent).toInt().coerceAtLeast(2)
             val minimumItems = gridColumns() * visibleRows * 2
             feedPrefillJob = lifecycleScope.launch {
-                var pages = 0
+                var batches = 0
+                var stalledBatches = 0
                 while (isActive && screen == target && currentFeed === feed &&
-                    feed.cards.size < minimumItems && feed.wantsMore && pages < 4) {
+                    feed.cards.size < minimumItems && feed.wantsMore && batches < 6) {
                     val previousCount = feed.cards.size
                     if (!feed.loading) feed.loadMore()
-                    val completed = withTimeoutOrNull(20_000L) {
+                    val completed = withTimeoutOrNull(25_000L) {
                         snapshotFlow { feed.loading }.first { !it }
                     } != null
                     if (!completed) {
-                        android.util.Log.w("HongguoTVFeed", "prefill timed out screen=$target")
+                        android.util.Log.w("HongguoTVFeed", "prefill timed out screen=$target batch=$batches cards=${feed.cards.size}")
                         break
                     }
-                    if (feed.error != null || feed.cards.size <= previousCount) break
-                    pages++
+                    batches++
+                    if (feed.error != null) {
+                        android.util.Log.w("HongguoTVFeed", "prefill stopped on error screen=$target error=${feed.error}")
+                        break
+                    }
+                    if (feed.cards.size <= previousCount) {
+                        stalledBatches++
+                        if (!feed.wantsMore || stalledBatches >= 2) {
+                            android.util.Log.w("HongguoTVFeed", "prefill stalled screen=$target cards=${feed.cards.size} batches=$batches more=${feed.wantsMore}")
+                            break
+                        }
+                    } else stalledBatches = 0
                 }
                 if (screen == target && currentFeed === feed) {
-                    android.util.Log.d(
-                        "HongguoTVFeed",
-                        "prefill finished screen=$target cards=${feed.cards.size} target=$minimumItems pages=$pages more=${feed.wantsMore}",
-                    )
+                    android.util.Log.d("HongguoTVFeed", "prefill finished screen=$target cards=${feed.cards.size} target=$minimumItems batches=$batches more=${feed.wantsMore}")
                 }
             }
         }
@@ -345,15 +356,19 @@ class MainActivity : ComponentActivity() {
             snapshot.loading -> "正在加载…"
             snapshot.feedError.isNotBlank() -> "${snapshot.feedError}\n按刷新重试"
             screen == Screen.FAVORITES -> "还没有收藏\n在剧集详情中保存喜欢的作品"
-            screen == Screen.HISTORY -> "还没有观看记录"
+            screen == Screen.HISTORY -> "还没有观看记录\n开始播放后会自动保存在这里"
             else -> "暂时没有内容\n按刷新重新获取"
         }
         header.text = headerTitle
-        subHeader.text = if (hasCards) {
-            "已加载 ${snapshot.cards.size} 部" +
-                if (snapshot.loading && currentFeed?.wantsMore == true) " · 正在加载更多…" else " · 长按海报收藏"
-        } else {
-            "红果内容通过网络加载 · 请确认电视已联网"
+        subHeader.text = when {
+            screen == Screen.HISTORY -> "确认：从上次进度继续播放 · 长按可收藏"
+            hasCards -> "已加载 ${snapshot.cards.size} 部" +
+                when {
+                    snapshot.loading && currentFeed?.wantsMore == true -> " · 正在加载更多…"
+                    snapshot.feedError.isNotBlank() -> " · 续载失败，按刷新重试"
+                    else -> " · 长按海报收藏"
+                }
+            else -> "红果内容通过网络加载 · 请确认电视已联网"
         }
     }
 
@@ -400,6 +415,20 @@ class MainActivity : ComponentActivity() {
         screen = Screen.SEARCH
         currentFeed?.loadMore()
         showShell()
+    }
+
+    private fun onCardSelected(card: Card) {
+        if (screen == Screen.HISTORY) {
+            val m = model ?: return
+            feedPrefillJob?.cancel()
+            feedPrefillJob = null
+            parentScreen = Screen.HISTORY
+            m.playSeason(card.id)
+            screen = Screen.PLAYER
+            showPlayer()
+            return
+        }
+        openDetail(card)
     }
 
     private fun openDetail(card: Card) {
@@ -532,14 +561,29 @@ class MainActivity : ComponentActivity() {
             setOnKeyListener { _, keyCode, event ->
                 if (event.action != KeyEvent.ACTION_DOWN) return@setOnKeyListener false
                 when (keyCode) {
-                    KeyEvent.KEYCODE_DPAD_LEFT -> { model?.player?.skip(-10.0); revealPlayerControls(); true }
-                    KeyEvent.KEYCODE_DPAD_RIGHT -> { model?.player?.skip(10.0); revealPlayerControls(); true }
-                    KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_MENU -> { revealPlayerControls(); playButton.requestFocus(); true }
-                    KeyEvent.KEYCODE_DPAD_DOWN -> { openEpisodeDialog(); true }
-                    KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER, KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE -> { togglePlayerPause(); revealPlayerControls(); true }
+                    KeyEvent.KEYCODE_DPAD_LEFT -> {
+                        if (playerControls.visibility == View.VISIBLE) false
+                        else { model?.player?.skip(-10.0); revealPlayerControls(); true }
+                    }
+                    KeyEvent.KEYCODE_DPAD_RIGHT -> {
+                        if (playerControls.visibility == View.VISIBLE) false
+                        else { model?.player?.skip(10.0); revealPlayerControls(); true }
+                    }
+                    KeyEvent.KEYCODE_DPAD_UP -> {
+                        if (playerControls.visibility == View.VISIBLE) false
+                        else { model?.player?.step(-1); revealPlayerControls(); true }
+                    }
+                    KeyEvent.KEYCODE_DPAD_DOWN -> {
+                        if (playerControls.visibility == View.VISIBLE) false
+                        else { model?.player?.step(1); revealPlayerControls(); true }
+                    }
+                    KeyEvent.KEYCODE_MENU -> { revealPlayerControls(focusControls = true); true }
+                    KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER, KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE -> {
+                        togglePlayerPause(focusControls = true)
+                        true
+                    }
                     KeyEvent.KEYCODE_MEDIA_PLAY -> { model?.player?.video?.play(); revealPlayerControls(); true }
                     KeyEvent.KEYCODE_MEDIA_PAUSE -> { model?.player?.video?.pause(); revealPlayerControls(); true }
-                    KeyEvent.KEYCODE_BACK -> { leavePlayer(); true }
                     else -> false
                 }
             }
@@ -584,14 +628,22 @@ class MainActivity : ComponentActivity() {
         })
         val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER }
         playButton = navButton("播放/暂停") { togglePlayerPause() }
-        row.addView(playButton, LinearLayout.LayoutParams(dp(126), dp(46)).apply { rightMargin = dp(7) })
-        row.addView(navButton("上一集") { model?.player?.step(-1) }, LinearLayout.LayoutParams(dp(102), dp(46)).apply { rightMargin = dp(7) })
-        row.addView(navButton("下一集") { model?.player?.step(1) }, LinearLayout.LayoutParams(dp(102), dp(46)).apply { rightMargin = dp(7) })
-        row.addView(navButton("选集") { openEpisodeDialog() }, LinearLayout.LayoutParams(dp(90), dp(46)).apply { rightMargin = dp(7) })
+        val previousEpisodeButton = navButton("上一集") { model?.player?.step(-1) }
+        val nextEpisodeButton = navButton("下一集") { model?.player?.step(1) }
+        val episodeSelectButton = navButton("选集") { openEpisodeDialog() }
         speedButton = navButton("倍速 1×") { chooseNextSpeed() }
-        row.addView(speedButton, LinearLayout.LayoutParams(dp(108), dp(46)).apply { rightMargin = dp(7) })
         qualityButton = navButton("画质") { chooseNextQuality() }
+        row.addView(playButton, LinearLayout.LayoutParams(dp(126), dp(46)).apply { rightMargin = dp(7) })
+        row.addView(previousEpisodeButton, LinearLayout.LayoutParams(dp(102), dp(46)).apply { rightMargin = dp(7) })
+        row.addView(nextEpisodeButton, LinearLayout.LayoutParams(dp(102), dp(46)).apply { rightMargin = dp(7) })
+        row.addView(episodeSelectButton, LinearLayout.LayoutParams(dp(90), dp(46)).apply { rightMargin = dp(7) })
+        row.addView(speedButton, LinearLayout.LayoutParams(dp(108), dp(46)).apply { rightMargin = dp(7) })
         row.addView(qualityButton, LinearLayout.LayoutParams(dp(90), dp(46)))
+        val focusButtons = listOf(playButton, previousEpisodeButton, nextEpisodeButton, episodeSelectButton, speedButton, qualityButton)
+        focusButtons.forEachIndexed { index, button ->
+            button.nextFocusLeftId = focusButtons[(index - 1 + focusButtons.size) % focusButtons.size].id
+            button.nextFocusRightId = focusButtons[(index + 1) % focusButtons.size].id
+        }
         playerControls.addView(row)
         retryButton = navButton("重试播放") { model?.player?.retry() }
         retryButton.visibility = View.GONE
@@ -602,15 +654,16 @@ class MainActivity : ComponentActivity() {
         playerLayer.addView(playerControls, FrameLayout.LayoutParams(-1, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM))
     }
 
-    private fun revealPlayerControls() {
+    private fun revealPlayerControls(focusControls: Boolean = false) {
         playerControls.visibility = View.VISIBLE
         handler.removeCallbacks(hideControls)
+        if (focusControls) playButton.requestFocus()
         if (model?.player?.paused == false) handler.postDelayed(hideControls, 6_000)
     }
 
-    private fun togglePlayerPause() {
+    private fun togglePlayerPause(focusControls: Boolean = false) {
         model?.player?.togglePause()
-        revealPlayerControls()
+        revealPlayerControls(focusControls)
     }
 
     private fun showPlayer() {
@@ -777,6 +830,19 @@ class MainActivity : ComponentActivity() {
         val index = player.qualities.indexOf(player.quality).coerceAtLeast(-1)
         player.chooseQuality(player.qualities[(index + 1) % player.qualities.size])
         renderPlayerState()
+    }
+
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        if (event.action == KeyEvent.ACTION_DOWN && screen == Screen.PLAYER &&
+            episodeDialog?.isShowing != true) {
+            when (event.keyCode) {
+                KeyEvent.KEYCODE_BACK -> { leavePlayer(); return true }
+                KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE -> { togglePlayerPause(focusControls = true); return true }
+                KeyEvent.KEYCODE_MEDIA_PLAY -> { model?.player?.video?.play(); revealPlayerControls(); return true }
+                KeyEvent.KEYCODE_MEDIA_PAUSE -> { model?.player?.video?.pause(); revealPlayerControls(); return true }
+            }
+        }
+        return super.dispatchKeyEvent(event)
     }
 
     private fun leavePlayer() {
@@ -1012,7 +1078,8 @@ class MainActivity : ComponentActivity() {
         val cards = when (screen) {
             Screen.FAVORITES -> m.favorites.cards
             Screen.HISTORY -> m.history.list.map {
-                Card(it.seriesID, it.title, it.cover, "第 ${it.episode} 集", episodes = it.total)
+                val position = if (it.position.isFinite()) it.position.coerceAtLeast(0.0) else 0.0
+                Card(it.seriesID, it.title, it.cover, "第 ${it.episode} 集 · ${timeLabel(position)}", episodes = it.total)
             }
             else -> currentFeed?.cards.orEmpty()
         }
@@ -1144,10 +1211,24 @@ class MainActivity : ComponentActivity() {
         super.onDestroy()
     }
 
+    private fun updateNavigationSelection() {
+        val active = when (screen) {
+            Screen.HOME, Screen.RANK, Screen.NEW, Screen.FAVORITES, Screen.HISTORY, Screen.DEVICE, Screen.SETTINGS -> screen
+            else -> null
+        }
+        for (index in 0 until rail.childCount) {
+            val button = rail.getChildAt(index) as? TextView ?: continue
+            if (button.tag !is Screen) continue
+            button.isSelected = button.tag == active
+            button.background = buttonBackground(button.hasFocus(), button.isSelected)
+        }
+    }
+
     private fun navButton(label: String, action: () -> Unit): TextView =
         TextView(this).apply {
+            id = View.generateViewId()
             text = label
-            textSize = 16f
+            textSize = 18f
             setTextColor(Color.WHITE)
             gravity = Gravity.CENTER
             isFocusable = true
@@ -1156,17 +1237,26 @@ class MainActivity : ComponentActivity() {
             background = buttonBackground(false)
             setOnClickListener { action() }
             onFocusChangeListener = View.OnFocusChangeListener { view, focused ->
-                view.background = buttonBackground(focused)
-                view.scaleX = if (focused) 1.035f else 1f
-                view.scaleY = if (focused) 1.035f else 1f
-                view.elevation = if (focused) dp(5).toFloat() else 0f
+                view.background = buttonBackground(focused, view.isSelected)
+                view.scaleX = if (focused) 1.045f else 1f
+                view.scaleY = if (focused) 1.045f else 1f
+                view.elevation = if (focused) dp(6).toFloat() else 0f
             }
         }
 
-    private fun buttonBackground(focused: Boolean) = GradientDrawable().apply {
+    private fun buttonBackground(focused: Boolean, selected: Boolean = false) = GradientDrawable().apply {
         cornerRadius = dp(8).toFloat()
-        setColor(if (focused) 0xff34465a.toInt() else 0xff1a2635.toInt())
-        setStroke(dp(if (focused) 3 else 1), if (focused) 0xffffb45c.toInt() else 0xff334256.toInt())
+        setColor(when {
+            focused -> 0xff34465a.toInt()
+            selected -> 0xff1d382f.toInt()
+            else -> 0xff1a2635.toInt()
+        })
+        setStroke(dp(if (focused) 3 else if (selected) 2 else 1),
+            when {
+                focused -> 0xffffb45c.toInt()
+                selected -> 0xff62d99a.toInt()
+                else -> 0xff334256.toInt()
+            })
     }
 
     private fun text(value: String, size: Float, color: Int, bold: Boolean = false) =

@@ -48,18 +48,18 @@ class TvCardAdapter(
             isFocusableInTouchMode = true
             background = cardBackground(false)
             setPadding(dp(5), dp(5), dp(5), dp(6))
-            layoutParams = RecyclerView.LayoutParams(-1, dp(242)).apply {
+            layoutParams = RecyclerView.LayoutParams(-1, dp(268)).apply {
                 setMargins(dp(5), dp(6), dp(5), dp(8))
             }
         }
         val poster = ImageView(context).apply {
             scaleType = ImageView.ScaleType.CENTER_CROP
-            layoutParams = LinearLayout.LayoutParams(-1, dp(174))
+            layoutParams = LinearLayout.LayoutParams(-1, dp(178))
             setBackgroundColor(0xff243449.toInt())
         }
         val title = TextView(context).apply {
             setTextColor(Color.WHITE)
-            textSize = 16f
+            textSize = 18f
             typeface = Typeface.DEFAULT_BOLD
             maxLines = 2
             gravity = Gravity.CENTER_VERTICAL
@@ -67,12 +67,12 @@ class TvCardAdapter(
         }
         val subtitle = TextView(context).apply {
             setTextColor(0xffa9b5c5.toInt())
-            textSize = 12f
+            textSize = 14f
             maxLines = 1
             setPadding(dp(4), dp(2), dp(4), 0)
         }
         root.addView(poster)
-        root.addView(title, LinearLayout.LayoutParams(-1, dp(38)))
+        root.addView(title, LinearLayout.LayoutParams(-1, dp(44)))
         root.addView(subtitle)
         return Holder(root, poster, title, subtitle)
     }

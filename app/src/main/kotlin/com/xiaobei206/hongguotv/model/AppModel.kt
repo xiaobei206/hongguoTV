@@ -180,10 +180,16 @@ class AppModel(
             return feed("rank:$content:$board") {
                 Feed(scope) { cursor ->
                     val r = catalog.shortRank(ShortRankQuery(content = content, board = board, cursor = cursor))
+                    val seriesItems = r.items.filter { it.seriesId.isNotEmpty() }
+                    debugLog {
+                        "rank page requestCursorLength=${cursor.length} responseCursorLength=${r.cursor.length} " +
+                            "cursorAdvanced=${r.cursor.isNotBlank() && r.cursor != cursor} rawItems=${r.items.size} " +
+                            "seriesItems=${seriesItems.size} hasMore=${r.hasMore} content=$content board=$board"
+                    }
                     FeedPage(cursor = r.cursor, more = r.hasMore).apply {
                         contents = r.contents
                         this.board = r.board
-                        cards = r.items.filter { it.seriesId.isNotEmpty() }.map { // the others are actors' rows
+                        cards = seriesItems.map {
                             Card(
                                 it.seriesId, it.title, it.coverUrl,
                                 sub = it.score.ifEmpty { episodeCount(it.episodeCount) },
@@ -209,9 +215,15 @@ class AppModel(
             return feed("new:$date") {
                 Feed(scope) { cursor ->
                     val r = catalog.newReleases(NewReleaseQuery(date = date, cursor = cursor))
+                    val seriesItems = r.items.filter { it.seriesId.isNotEmpty() }
+                    debugLog {
+                        "new-release page date=$date requestCursorLength=${cursor.length} responseCursorLength=${r.cursor.length} " +
+                            "cursorAdvanced=${r.cursor.isNotBlank() && r.cursor != cursor} rawItems=${r.items.size} " +
+                            "seriesItems=${seriesItems.size} hasMore=${r.hasMore}"
+                    }
                     FeedPage(cursor = r.cursor, more = r.hasMore).apply {
                         dates = r.dates
-                        cards = r.items.map {
+                        cards = seriesItems.map {
                             val sub = if (!it.online && it.note.isNotEmpty()) it.note else it.heat
                             Card(it.seriesId, it.title, it.coverUrl, sub, episodes = it.episodeCount)
                         }
