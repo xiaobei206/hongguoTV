@@ -34,7 +34,7 @@ object PhoneDiagnosticClient {
     suspend fun sendToAll(context: Context, report: String): DiagnosticSendResult =
         withContext(Dispatchers.IO) {
             require(report.isNotBlank()) { "诊断内容为空" }
-            require(report.length <= 220 * 1024) { "诊断信息超过局域网投送限制" }
+            require(report.toByteArray(Charsets.UTF_8).size <= 192 * 1024) { "诊断信息超过局域网投送限制" }
             val phones = discover(context.applicationContext)
             if (phones.isEmpty()) return@withContext DiagnosticSendResult(0, 0, emptyList())
             val failures = mutableListOf<String>()

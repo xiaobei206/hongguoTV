@@ -583,7 +583,7 @@ class MainActivity : ComponentActivity() {
         }
         val failed = player.state as? PlayerState.Failed
         retryButton.visibility = if (failed != null) View.VISIBLE else View.GONE
-        diagnosticButton.visibility = if (failed?.diagnostic != null) View.VISIBLE else View.GONE
+        diagnosticButton.visibility = if (failed != null) View.VISIBLE else View.GONE
         if (failed != null) {
             playerControls.visibility = View.VISIBLE
             handler.removeCallbacks(hideControls)
