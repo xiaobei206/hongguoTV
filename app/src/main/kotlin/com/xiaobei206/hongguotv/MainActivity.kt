@@ -33,6 +33,13 @@ import android.widget.ScrollView
 import android.widget.SeekBar
 import android.widget.TextView
 import androidx.activity.ComponentActivity
+import androidx.compose.ui.platform.ComposeView
+import androidx.compose.ui.platform.ViewCompositionStrategy
+import androidx.compose.ui.platform.setContent
+import com.xiaobei206.hongguotv.ui.TvFeedFilterChoice
+import com.xiaobei206.hongguotv.ui.TvFeedFilterRow
+import com.xiaobei206.hongguotv.ui.TvFeedScreen
+import com.xiaobei206.hongguotv.ui.TvFeedUiState
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
@@ -87,6 +94,9 @@ class MainActivity : ComponentActivity() {
     private var headerTitle = "推荐"
     private var renderedScreen: Screen? = null
     private var renderedFilterKey = ""
+    private var feedComposeView: ComposeView? = null
+    private var composeFeed by mutableStateOf<Feed?>(null)
+    private var composeFeedUi by mutableStateOf<TvFeedUiState?>(null)
 
     private lateinit var shell: LinearLayout
     private lateinit var rail: LinearLayout
@@ -97,7 +107,6 @@ class MainActivity : ComponentActivity() {
     private lateinit var feedFilterHost: LinearLayout
     private lateinit var recycler: RecyclerView
     private lateinit var emptyState: TextView
-    private lateinit var cardAdapter: TvCardAdapter
     private lateinit var playerView: PlayerView
     private lateinit var playerControls: LinearLayout
     private lateinit var playerTitle: TextView
@@ -162,10 +171,6 @@ class MainActivity : ComponentActivity() {
         if (m == null) {
             showStartupError(tvApp.startupError)
             return
-        }
-        cardAdapter = TvCardAdapter(this, tvApp.artwork, ::onCardSelected) { card ->
-            val added = m.favorites.toggle(Fav.of(card))
-            toast(if (added) "已收藏：${card.title}" else "已取消收藏：${card.title}")
         }
         enterFeed(Screen.HOME)
         lifecycleScope.launch {
@@ -282,127 +287,149 @@ class MainActivity : ComponentActivity() {
 
     private fun buildFeedContent() {
         contentHost.removeAllViews()
-        val column = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        val top = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
-        header = text(headerTitle, 27f, Color.WHITE, true)
-        top.addView(header, LinearLayout.LayoutParams(0, dp(52), 1f))
-        top.addView(navButton("搜索") { openSearchDialog() }, LinearLayout.LayoutParams(dp(90), dp(42)))
-        top.addView(navButton("刷新") { refreshCurrentFeed() }, LinearLayout.LayoutParams(dp(90), dp(42)))
-        column.addView(top)
-        subHeader = text("方向键移动 · 确认打开 · 长按收藏", 16f, 0xffa7b2c2.toInt())
-        column.addView(subHeader, LinearLayout.LayoutParams(-1, dp(30)))
-        feedFilterHost = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; visibility = View.GONE }
-        renderedFilterKey = ""
-        column.addView(feedFilterHost, LinearLayout.LayoutParams(-1, ViewGroup.LayoutParams.WRAP_CONTENT))
-        recycler = RecyclerView(this).apply {
-            id = View.generateViewId()
-            layoutManager = GridLayoutManager(this@MainActivity, gridColumns())
-            adapter = cardAdapter
-            setHasFixedSize(true)
-            setItemViewCacheSize(3)
-            itemAnimator = null
-            overScrollMode = View.OVER_SCROLL_NEVER
-            setPadding(dp(2), dp(4), dp(2), dp(10))
-            clipToPadding = false
-            addOnScrollListener(object : RecyclerView.OnScrollListener() {
-                override fun onScrolled(rv: RecyclerView, dx: Int, dy: Int) {
-                    val manager = rv.layoutManager as? GridLayoutManager ?: return
-                    val feed = currentFeed ?: return
-                    if (dy > 0 &&
-                        manager.findLastVisibleItemPosition() >= manager.itemCount - gridColumns() * 3 &&
-                        feed.wantsMore) {
-                        loadMoreAtEnd(rv, feed)
-                    }
-                }
-            })
+        val view = ComposeView(this).apply {
+            setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnViewTreeLifecycleDestroyed)
         }
-        val frame = FrameLayout(this)
-        frame.addView(recycler, FrameLayout.LayoutParams(-1, -1))
-        emptyState = text("正在连接红果…", 18f, 0xffa7b2c2.toInt()).apply { gravity = Gravity.CENTER }
-        frame.addView(emptyState, FrameLayout.LayoutParams(-1, -1))
-        column.addView(frame, LinearLayout.LayoutParams(-1, 0, 1f))
-        contentHost.addView(column, FrameLayout.LayoutParams(-1, -1))
-        recycler.post {
-            if (cardAdapter.itemCount > 0) {
-                recycler.findViewHolderForAdapterPosition(0)?.itemView?.requestFocus()
-            } else {
-                rail.getChildAt(1)?.requestFocus()
+        feedComposeView = view
+        contentHost.addView(view, FrameLayout.LayoutParams(-1, -1))
+        view.setContent {
+            val state = composeFeedUi
+            if (state != null) {
+                TvFeedScreen(
+                    state = state,
+                    feed = composeFeed,
+                    artwork = tvApp.artwork,
+                    onCardSelected = ::onCardSelected,
+                    onToggleFavorite = { card ->
+                        val added = model?.favorites?.toggle(Fav.of(card)) == true
+                        toast(if (added) "已收藏：${card.title}" else "已取消收藏：${card.title}")
+                    },
+                    onSearch = ::openSearchDialog,
+                    onRefresh = ::refreshCurrentFeed,
+                    onFilterSelected = ::onComposeFeedFilterSelected,
+                )
             }
         }
     }
 
-
-    /**
-     * Ranking and new-release APIs return a page at a time. Populate roughly two
-     * viewport-heights before asking the viewer to scroll, then let onScrolled
-     * keep a three-row buffer ahead during downward navigation. Empty cursor-advancing
-     * batches are retried while the viewer remains near the end of the grid.
-     */
+    /** Initial list fill and scroll prefetch are coordinated by TvFeedScreen. */
     private fun scheduleInitialFeedPrefill(target: Screen, feed: Feed) {
-        if (target != Screen.RANK && target != Screen.NEW) return
-        feedPrefillJob?.cancel()
-        feedScrollLoadJob?.cancel()
-        recycler.post {
-            if (screen != target || currentFeed !== feed) return@post
-            val rowExtent = dp(282).coerceAtLeast(1)
-            val visibleRows = ceil(recycler.height.toDouble() / rowExtent).toInt().coerceAtLeast(2)
-            val minimumItems = gridColumns() * visibleRows * 2
-            feedPrefillJob = lifecycleScope.launch {
-                var batches = 0
-                var stalledBatches = 0
-                while (isActive && screen == target && currentFeed === feed &&
-                    feed.cards.size < minimumItems && feed.wantsMore && batches < 12) {
-                    val previousCount = feed.cards.size
-                    if (!feed.loading) feed.loadMore()
-                    val completed = withTimeoutOrNull(25_000L) {
-                        snapshotFlow { feed.loading }.first { !it }
-                    } != null
-                    if (!completed) {
-                        android.util.Log.w("HongguoTVFeed", "prefill timed out screen=$target batch=$batches cards=${feed.cards.size}")
-                        break
-                    }
-                    batches++
-                    if (feed.error != null) {
-                        android.util.Log.w("HongguoTVFeed", "prefill stopped on error screen=$target error=${feed.error}")
-                        break
-                    }
-                    if (feed.cards.size <= previousCount) {
-                        stalledBatches++
-                        if (!feed.wantsMore || stalledBatches >= 4) {
-                            android.util.Log.w("HongguoTVFeed", "prefill stalled screen=$target cards=${feed.cards.size} batches=$batches more=${feed.wantsMore}")
-                            break
-                        }
-                    } else stalledBatches = 0
-                }
-                if (screen == target && currentFeed === feed) {
-                    android.util.Log.d("HongguoTVFeed", "prefill finished screen=$target cards=${feed.cards.size} target=$minimumItems batches=$batches more=${feed.wantsMore}")
-                }
-            }
-        }
+        // Intentionally centralized in Compose so it can use the actual grid viewport and visible-item state.
     }
 
     private fun renderFeed(snapshot: UiSnapshot) {
-        renderFeedFilters(snapshot)
-        cardAdapter.submit(snapshot.cards)
-        val hasCards = snapshot.cards.isNotEmpty()
-        emptyState.visibility = if (hasCards) View.GONE else View.VISIBLE
-        emptyState.text = when {
-            snapshot.loading -> "正在加载…"
-            snapshot.feedError.isNotBlank() -> "${snapshot.feedError}\n按刷新重试"
-            screen == Screen.FAVORITES -> "还没有收藏\n在剧集详情中保存喜欢的作品"
-            screen == Screen.HISTORY -> "还没有观看记录\n开始播放后会自动保存在这里"
-            else -> "暂时没有内容\n按刷新重新获取"
-        }
-        header.text = headerTitle
-        subHeader.text = when {
-            screen == Screen.HISTORY -> "确认：从上次进度继续播放 · 长按可收藏"
-            hasCards -> "已加载 ${snapshot.cards.size} 部" +
-                when {
-                    snapshot.loading && currentFeed?.wantsMore == true -> " · 正在加载更多…"
-                    snapshot.feedError.isNotBlank() -> " · 续载失败，按刷新重试"
-                    else -> " · 长按海报收藏"
+        composeFeed = currentFeed
+        val m = model
+        val today = todayKey()
+        val filterRows = when (screen) {
+            Screen.RANK -> buildList {
+                if (snapshot.rankContents.isNotEmpty()) {
+                    add(TvFeedFilterRow("分类", snapshot.rankContents.map { content ->
+                        TvFeedFilterChoice(
+                            key = "rank-content:${content.id}",
+                            label = content.name.ifBlank { content.id },
+                            selected = snapshot.currentRankContent == content.id,
+                        )
+                    }))
+                    if (snapshot.rankBoards.isNotEmpty()) {
+                        val choices = ArrayList<TvFeedFilterChoice>()
+                        choices += TvFeedFilterChoice(
+                            key = "rank-board:default",
+                            label = "默认",
+                            selected = snapshot.rankBoard.isEmpty() && snapshot.rankBoards.none { it.selected },
+                        )
+                        snapshot.rankBoards.forEach { board ->
+                            choices += TvFeedFilterChoice(
+                                key = "rank-board:${board.id}",
+                                label = board.name.ifBlank { board.id },
+                                selected = board.id == snapshot.rankBoard ||
+                                    (snapshot.rankBoard.isEmpty() && board.selected),
+                            )
+                        }
+                        add(TvFeedFilterRow("榜单", choices))
+                    }
                 }
-            else -> "红果内容通过网络加载 · 请确认电视已联网"
+            }
+            Screen.NEW -> listOf(
+                TvFeedFilterRow(
+                    "上线日期",
+                    (listOf(today) + snapshot.newDates).distinct().map { date ->
+                        TvFeedFilterChoice(
+                            key = "new-date:$date",
+                            label = dayLabel(date, today),
+                            selected = m?.dayIsOn(date) == true,
+                        )
+                    },
+                ),
+            )
+            else -> emptyList()
+        }
+        val emptyMessage = when (screen) {
+            Screen.FAVORITES -> "还没有收藏\n在剧集详情中保存喜欢的作品"
+            Screen.HISTORY -> "还没有观看记录\n开始播放后会自动保存在这里"
+            else -> "暂时没有内容；确认电视已联网后，可以按刷新重试"
+        }
+        val status = when {
+            snapshot.cards.isNotEmpty() && snapshot.loading && currentFeed?.wantsMore == true ->
+                "已加载 ${snapshot.cards.size} 部 · 正在后台补载更多剧集"
+            snapshot.cards.isNotEmpty() && snapshot.feedError.isNotBlank() ->
+                "已加载 ${snapshot.cards.size} 部 · 本批续载失败，可刷新重试"
+            snapshot.cards.isNotEmpty() -> "已加载 ${snapshot.cards.size} 部 · 长按海报收藏"
+            snapshot.loading -> "正在连接红果并获取剧集"
+            else -> "电视遥控器可直接浏览海报；长按确认键可收藏"
+        }
+        val feedKey = buildString {
+            append(screen.name).append('|').append(headerTitle)
+            when (screen) {
+                Screen.RANK -> append('|').append(snapshot.currentRankContent).append('|').append(snapshot.rankBoard)
+                Screen.NEW -> append('|').append(snapshot.newDate)
+                else -> Unit
+            }
+        }
+        composeFeedUi = TvFeedUiState(
+            screenKey = screen.name,
+            feedKey = feedKey,
+            title = headerTitle,
+            status = status,
+            cards = snapshot.cards,
+            loading = snapshot.loading,
+            error = snapshot.feedError,
+            emptyMessage = emptyMessage,
+            filterRows = filterRows,
+        )
+    }
+
+    private fun onComposeFeedFilterSelected(key: String) {
+        val m = model ?: return
+        when {
+            key.startsWith("rank-content:") -> {
+                val content = key.removePrefix("rank-content:")
+                if (m.rankContent != content) {
+                    m.rankContent = content
+                    m.rankBoard = ""
+                    enterFeed(Screen.RANK)
+                }
+            }
+            key == "rank-board:default" -> {
+                if (m.rankBoard.isNotEmpty()) {
+                    m.rankBoard = ""
+                    enterFeed(Screen.RANK)
+                }
+            }
+            key.startsWith("rank-board:") -> {
+                val board = key.removePrefix("rank-board:")
+                if (m.rankBoard != board) {
+                    m.rankBoard = board
+                    enterFeed(Screen.RANK)
+                }
+            }
+            key.startsWith("new-date:") -> {
+                val date = key.removePrefix("new-date:")
+                if (!m.dayIsOn(date)) {
+                    m.chooseDay(date)
+                    enterFeed(Screen.NEW)
+                }
+            }
         }
     }
 
