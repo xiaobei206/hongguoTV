@@ -19,6 +19,9 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.TimeoutCancellationException
+import kotlin.coroutines.cancellation.CancellationException
 import org.json.JSONArray
 import java.io.File
 import java.security.MessageDigest
@@ -349,7 +352,8 @@ class AppModel(
     /** The series' page, loading it unless it is here or on its way. */
     fun seriesPage(id: String): SeriesPage {
         val sp = seriesEntry(id)
-        if (sp.series == null && !sp.loading && sp.error == null) loadSeries(sp)
+        // A prior failed/timed-out request must not poison future opens from history/favorites.
+        if (sp.series == null && !sp.loading) loadSeries(sp)
         return sp
     }
 
@@ -357,32 +361,47 @@ class AppModel(
     fun seriesEntry(id: String): SeriesPage = series.getOrPut(id) { SeriesPage(id) }
 
     fun loadSeries(sp: SeriesPage) {
+        if (sp.loading) return
         sp.loading = true
         sp.error = null
         val id = sp.id
         scope.launch {
-            val s = launchAttempt { catalog.getSeries(id) }
-            val e = launchAttempt { catalog.listEpisodes(id, EpisodeOptions()).items }
-            val series = s.await()
-            val episodes = e.await()
-            sp.loading = false
-            val seriesError = series.exceptionOrNull()
-            val episodesError = episodes.exceptionOrNull()
-            when {
-                seriesError != null -> sp.error = seriesError
-                episodesError != null && !isCode(episodesError, ErrorCode.ANONYMOUS_LIMITED) -> sp.error = episodesError
-                else -> {
-                    val got = series.getOrThrow()
-                    sp.series = got
-                    sp.episodes = episodes.getOrDefault(emptyList())
-                    if (got.isMultiSeason && sp.seasons == null) loadSeasons(sp)
+            try {
+                // A catalog request that never returns used to leave the detail page
+                // permanently loading. Bound both parallel calls and always release
+                // the state so the viewer can retry without leaving the page.
+                val (seriesResult, episodesResult) = withTimeout(20_000L) {
+                    val s = async { attempt { catalog.getSeries(id) } }
+                    val e = async { attempt { catalog.listEpisodes(id, EpisodeOptions()).items } }
+                    s.await() to e.await()
                 }
+                val seriesError = seriesResult.exceptionOrNull()
+                val episodesError = episodesResult.exceptionOrNull()
+                when {
+                    seriesError != null -> sp.error = seriesError
+                    episodesError != null && !isCode(episodesError, ErrorCode.ANONYMOUS_LIMITED) ->
+                        sp.error = episodesError
+                    else -> {
+                        val got = seriesResult.getOrThrow()
+                        sp.series = got
+                        sp.episodes = episodesResult.getOrDefault(emptyList())
+                        if (got.isMultiSeason && sp.seasons == null) loadSeasons(sp)
+                    }
+                }
+            } catch (e: TimeoutCancellationException) {
+                sp.error = AppError("读取剧集信息超时，请选择“重新加载”重试")
+                debugLog { "series detail timeout id=$id" }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                sp.error = e
+                debugLog { "series detail failed id=$id error=$e" }
+            } finally {
+                sp.loading = false
             }
             player.fillPending(sp) // starts the episode, or says why it can't
         }
     }
-
-    private fun <T> CoroutineScope.launchAttempt(block: suspend () -> T) = async { attempt { block() } }
 
     /** Lists the seasons of a series in several, and gives the list to the page of each. */
     private fun loadSeasons(sp: SeriesPage) {

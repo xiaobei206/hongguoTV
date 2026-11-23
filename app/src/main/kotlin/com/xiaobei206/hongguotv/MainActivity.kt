@@ -55,10 +55,13 @@ import com.xiaobei206.hongguotv.playback.PlaybackDiagnostics
 import com.xiaobei206.hongguotv.model.metaLine
 import dev.openhongguo.Episode
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
+import kotlin.math.ceil
 
 @androidx.media3.common.util.UnstableApi
 class MainActivity : ComponentActivity() {
@@ -69,6 +72,7 @@ class MainActivity : ComponentActivity() {
     private val updateManager by lazy { TvUpdateManager(this) }
     private var checkingForUpdate = false
     private var pendingInstallApk: File? = null
+    private var feedPrefillJob: Job? = null
     private var screen by mutableStateOf(Screen.HOME)
     private var parentScreen = Screen.HOME
     private var currentFeed: Feed? = null
@@ -207,6 +211,8 @@ class MainActivity : ComponentActivity() {
 
     private fun enterFeed(target: Screen) {
         val m = model ?: return
+        feedPrefillJob?.cancel()
+        feedPrefillJob = null
         parentScreen = target
         currentSeries = null
         currentFeed = when (target) {
@@ -224,6 +230,7 @@ class MainActivity : ComponentActivity() {
         screen = target
         currentFeed?.let { if (!it.started || it.stale) it.loadMore() }
         showShell()
+        currentFeed?.let { feed -> scheduleInitialFeedPrefill(target, feed) }
     }
 
     private fun showShell() {
@@ -267,8 +274,11 @@ class MainActivity : ComponentActivity() {
                 override fun onScrolled(rv: RecyclerView, dx: Int, dy: Int) {
                     val manager = rv.layoutManager as? GridLayoutManager ?: return
                     val feed = currentFeed ?: return
-                    if (manager.findLastVisibleItemPosition() >= manager.itemCount - gridColumns() * 2 &&
-                        feed.wantsMore && !feed.loading) feed.loadMore()
+                    if (dy > 0 &&
+                        manager.findLastVisibleItemPosition() >= manager.itemCount - gridColumns() * 3 &&
+                        feed.wantsMore && !feed.loading) {
+                        feed.loadMore()
+                    }
                 }
             })
         }
@@ -287,6 +297,46 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+
+    /**
+     * Ranking and new-release APIs return a page at a time. Populate roughly two
+     * viewport-heights before asking the viewer to scroll, then let onScrolled
+     * keep a three-row buffer ahead during downward navigation.
+     */
+    private fun scheduleInitialFeedPrefill(target: Screen, feed: Feed) {
+        if (target != Screen.RANK && target != Screen.NEW) return
+        feedPrefillJob?.cancel()
+        recycler.post {
+            if (screen != target || currentFeed !== feed) return@post
+            val rowExtent = dp(256).coerceAtLeast(1)
+            val visibleRows = ceil(recycler.height.toDouble() / rowExtent).toInt().coerceAtLeast(2)
+            val minimumItems = gridColumns() * visibleRows * 2
+            feedPrefillJob = lifecycleScope.launch {
+                var pages = 0
+                while (isActive && screen == target && currentFeed === feed &&
+                    feed.cards.size < minimumItems && feed.wantsMore && pages < 4) {
+                    val previousCount = feed.cards.size
+                    if (!feed.loading) feed.loadMore()
+                    val completed = withTimeoutOrNull(20_000L) {
+                        snapshotFlow { feed.loading }.first { !it }
+                    } != null
+                    if (!completed) {
+                        android.util.Log.w("HongguoTVFeed", "prefill timed out screen=$target")
+                        break
+                    }
+                    if (feed.error != null || feed.cards.size <= previousCount) break
+                    pages++
+                }
+                if (screen == target && currentFeed === feed) {
+                    android.util.Log.d(
+                        "HongguoTVFeed",
+                        "prefill finished screen=$target cards=${feed.cards.size} target=$minimumItems pages=$pages more=${feed.wantsMore}",
+                    )
+                }
+            }
+        }
+    }
+
     private fun renderFeed(snapshot: UiSnapshot) {
         cardAdapter.submit(snapshot.cards)
         val hasCards = snapshot.cards.isNotEmpty()
@@ -299,7 +349,12 @@ class MainActivity : ComponentActivity() {
             else -> "暂时没有内容\n按刷新重新获取"
         }
         header.text = headerTitle
-        subHeader.text = if (hasCards) "共 ${snapshot.cards.size} 部 · 长按海报收藏" else "红果内容通过网络加载 · 请确认电视已联网"
+        subHeader.text = if (hasCards) {
+            "已加载 ${snapshot.cards.size} 部" +
+                if (snapshot.loading && currentFeed?.wantsMore == true) " · 正在加载更多…" else " · 长按海报收藏"
+        } else {
+            "红果内容通过网络加载 · 请确认电视已联网"
+        }
     }
 
     private fun refreshCurrentFeed() {
@@ -349,6 +404,8 @@ class MainActivity : ComponentActivity() {
 
     private fun openDetail(card: Card) {
         val m = model ?: return
+        feedPrefillJob?.cancel()
+        feedPrefillJob = null
         parentScreen = screen
         currentSeries = m.seriesPage(card.id)
         screen = Screen.DETAIL
@@ -497,8 +554,7 @@ class MainActivity : ComponentActivity() {
                 intArrayOf(0xdd07101b.toInt(), 0x0007101b))
         }
         playerTitle = text("红果 TV", 20f, Color.WHITE, true)
-        top.addView(playerTitle, LinearLayout.LayoutParams(0, dp(46), 1f))
-        top.addView(navButton("退出播放") { leavePlayer() }, LinearLayout.LayoutParams(dp(126), dp(42)))
+        top.addView(playerTitle, LinearLayout.LayoutParams(-1, dp(46)))
         playerLayer.addView(top, FrameLayout.LayoutParams(-1, dp(66), Gravity.TOP))
 
         playerControls = LinearLayout(this).apply {
@@ -1005,7 +1061,12 @@ class MainActivity : ComponentActivity() {
     override fun onBackPressed() {
         when (screen) {
             Screen.PLAYER -> leavePlayer()
-            Screen.DETAIL -> { screen = parentScreen; currentSeries = null; showShell() }
+            Screen.DETAIL -> {
+                screen = parentScreen
+                currentSeries = null
+                showShell()
+                currentFeed?.let { feed -> scheduleInitialFeedPrefill(screen, feed) }
+            }
             Screen.SEARCH -> { screen = parentScreen; currentFeed = feedFor(parentScreen); showShell() }
             Screen.HOME -> super.onBackPressed()
             else -> enterFeed(Screen.HOME)
