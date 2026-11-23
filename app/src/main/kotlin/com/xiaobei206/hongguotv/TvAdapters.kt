@@ -116,6 +116,7 @@ class TvCardAdapter(
         holder.rankBadge.visibility = if (card.rank > 0) View.VISIBLE else View.GONE
         if (card.rank > 0) {
             holder.rankBadge.text = "TOP " + card.rank.toString().padStart(2, '0')
+            holder.rankBadge.setTextColor(if (card.rank <= 3) 0xff10151c.toInt() else 0xffedf3fb.toInt())
             holder.rankBadge.background = badgeBackground(card.rank <= 3)
         }
         artwork.load(card.cover, holder.poster)

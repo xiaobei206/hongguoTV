@@ -1580,7 +1580,7 @@ class MainActivity : ComponentActivity() {
         val density = resources.displayMetrics.density.coerceAtLeast(1f)
         val screenWidthDp = resources.displayMetrics.widthPixels / density
         val availableDp = if (::contentHost.isInitialized && contentHost.width > 0) {
-            contentHost.width / density - 36f
+            contentHost.width / density - 42f
         } else {
             screenWidthDp - 196f - 36f
         }
