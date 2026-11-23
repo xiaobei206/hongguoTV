@@ -13,6 +13,7 @@ import dev.openhongguo.OpenhongguoClient
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.MainScope
 
+@androidx.media3.common.util.UnstableApi
 class TvApplication : Application() {
     var model: AppModel? = null
         private set
