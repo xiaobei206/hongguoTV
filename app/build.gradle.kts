@@ -87,7 +87,7 @@ dependencies {
     implementation("androidx.media3:media3-session:1.8.1")
     implementation("io.github.beilunyang:openhongguo:0.4.0")
 
-    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.5")
+    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs_nio:2.1.5")
 
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.json:json:20250517")
