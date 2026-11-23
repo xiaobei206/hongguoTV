@@ -188,7 +188,13 @@ class MainActivity : ComponentActivity() {
             setPadding(dp(12), dp(18), dp(10), dp(12))
             setBackgroundColor(0xff101925.toInt())
         }
-        rail.addView(text("红果 TV", 24f, 0xff72dba0.toInt(), true), LinearLayout.LayoutParams(-1, dp(62)))
+        val brand = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(7), dp(2), dp(7), dp(2))
+            addView(text("红果 TV", 23f, 0xff72dba0.toInt(), true), LinearLayout.LayoutParams(-1, dp(34)))
+            addView(text("大屏短剧", 12f, 0xff9bacbe.toInt()), LinearLayout.LayoutParams(-1, dp(22)))
+        }
+        rail.addView(brand, LinearLayout.LayoutParams(-1, dp(68)).apply { bottomMargin = dp(8) })
         addNav("首页", Screen.HOME)
         addNav("排行榜", Screen.RANK)
         addNav("新剧上线", Screen.NEW)
@@ -196,6 +202,8 @@ class MainActivity : ComponentActivity() {
         addNav("我的收藏", Screen.FAVORITES)
         addNav("观看历史", Screen.HISTORY)
         rail.addView(View(this), LinearLayout.LayoutParams(1, 0, 1f))
+        rail.addView(View(this).apply { setBackgroundColor(0xff273648.toInt()) },
+            LinearLayout.LayoutParams(-1, dp(1)).apply { topMargin = dp(7); bottomMargin = dp(7) })
         addNav("设备信息", Screen.DEVICE)
         addNav("设置", Screen.SETTINGS)
         contentHost = FrameLayout(this).apply { setPadding(dp(14), dp(8), dp(22), dp(12)) }
@@ -214,7 +222,9 @@ class MainActivity : ComponentActivity() {
     private fun addNav(label: String, target: Screen, action: (() -> Unit)? = null) {
         val button = navButton(label) { if (action != null) action() else navigate(target) }
         button.tag = target
-        rail.addView(button, LinearLayout.LayoutParams(-1, dp(56)))
+        rail.addView(button, LinearLayout.LayoutParams(-1, dp(48)).apply {
+            topMargin = dp(3); bottomMargin = dp(3); leftMargin = dp(2); rightMargin = dp(2)
+        })
     }
 
     private fun navigate(target: Screen) {
@@ -1312,7 +1322,7 @@ class MainActivity : ComponentActivity() {
         }
 
     private fun buttonBackground(focused: Boolean, selected: Boolean = false) = GradientDrawable().apply {
-        cornerRadius = dp(8).toFloat()
+        cornerRadius = dp(10).toFloat()
         setColor(when {
             focused -> 0xff34465a.toInt()
             selected -> 0xff1d382f.toInt()
