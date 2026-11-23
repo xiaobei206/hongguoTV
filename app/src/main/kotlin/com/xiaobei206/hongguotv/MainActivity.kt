@@ -291,6 +291,9 @@ class MainActivity : ComponentActivity() {
 
     private fun buildFeedContent() {
         contentHost.removeAllViews()
+        composeFeed = null
+        composeFeedUi = null
+        composeDetailUi = null
         val view = ComposeView(this).apply {
             setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnDetachedFromWindowOrReleasedFromPool)
         }
