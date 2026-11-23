@@ -538,7 +538,7 @@ class MainActivity : ComponentActivity() {
             resumeLabel = resume?.label ?: "播放第 1 集",
             episodes = snapshot.episodes,
             partLabels = snapshot.detailParts,
-            selectedPart = snapshot.detailPart,
+            selectedPart = snapshot.detailPart.coerceIn(0, (snapshot.detailParts.size - 1).coerceAtLeast(0)),
             currentEpisodeNumber = snapshot.currentEpisodeNumber,
             favorite = model?.favorites?.has(page.id) == true,
             loading = snapshot.detailLoading,
