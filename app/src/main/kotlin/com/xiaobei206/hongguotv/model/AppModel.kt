@@ -3,6 +3,7 @@ package com.xiaobei206.hongguotv.model
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import dev.openhongguo.DiscoverOptions
 import dev.openhongguo.EpisodeOptions
 import dev.openhongguo.ErrorCode
@@ -18,7 +19,9 @@ import dev.openhongguo.ShortRankQuery
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.TimeoutCancellationException
@@ -70,6 +73,8 @@ class AppModel(
 
     // Series.
     private val series = HashMap<String, SeriesPage>()
+    private var historyResumeJob: Job? = null
+    private var historyResumeGeneration = 0L
 
     val player = Player(this, video, streams)
 
@@ -446,8 +451,14 @@ class AppModel(
         sp.seasonsLoading = true
         val id = sp.id
         scope.launch {
-            val album = attempt { catalog.seasons(id) }.getOrNull()
-            sp.seasonsLoading = false
+            val album = try {
+                withTimeout(15_000L) { attempt { catalog.seasons(id) }.getOrNull() }
+            } catch (e: TimeoutCancellationException) {
+                debugLog { "season list timeout id=$id" }
+                null
+            } finally {
+                sp.seasonsLoading = false
+            }
             if (album == null || album.seasons.size < 2) {
                 sp.seasons = emptyList() // one season: nothing to choose
                 return@launch
@@ -479,20 +490,61 @@ class AppModel(
         return Resume(sp.id, w.episode, maxOf(0.0, w.position - 3), "继续看第 ${w.episode} 集")
     }
 
-    /** Plays a season from where the viewer left it, else from its first episode. */
+    /** Plays a season from where the viewer left it, including after a completed episode or season. */
     fun playSeason(id: String) {
-        val sp = series[id]
-        if (sp?.series != null) {
-            val r = resumePoint(sp)
-            player.play(r.seriesID, r.number, r.start)
+        val sp = seriesEntry(id)
+        val watch = history.get(id)
+        historyResumeJob?.cancel()
+        historyResumeJob = null
+        historyResumeGeneration++
+
+        if (watch == null) {
+            player.play(id, 1)
             return
         }
-        val w = history.get(id)
-        if (w != null && !w.finished) {
-            player.play(id, w.episode, maxOf(0.0, w.position - 3))
+        if (!watch.finished) {
+            if (sp.series != null) {
+                val resume = resumePoint(sp)
+                player.play(resume.seriesID, resume.number, resume.start)
+            } else {
+                player.play(id, watch.episode, maxOf(0.0, watch.position - 3))
+            }
             return
         }
-        player.play(id, 1)
+
+        val needsSeasonMetadata = sp.series?.isMultiSeason == true && sp.seasons == null
+        val needsSeriesMetadata = sp.series == null
+        if (needsSeriesMetadata && !sp.loading) loadSeries(sp)
+        if (needsSeasonMetadata && !sp.seasonsLoading) loadSeasons(sp)
+
+        // Keep the player visibly resolving while the completed-history entry is
+        // checked against the next episode/season. It stays paused until the target
+        // is known, so it never flashes or plays the episode that was just finished.
+        player.play(id, watch.episode.coerceAtLeast(1), 0.0, paused = true)
+        val generation = historyResumeGeneration
+        historyResumeJob = scope.launch {
+            val ready = try {
+                withTimeout(35_000L) {
+                    snapshotFlow { sp.loading || sp.seasonsLoading }.first { !it }
+                }
+                true
+            } catch (e: TimeoutCancellationException) {
+                debugLog { "history resume metadata timeout id=$id" }
+                false
+            }
+            if (!ready || generation != historyResumeGeneration) return@launch
+            historyResumeJob = null
+            if (sp.series == null) return@launch // The player shows the original detail-loading failure.
+            val resume = resumePoint(sp)
+            player.play(resume.seriesID, resume.number, resume.start)
+        }
+    }
+
+    /** Cancels a deferred history resume when the viewer leaves the player. */
+    fun cancelPendingHistoryResume() {
+        historyResumeGeneration++
+        historyResumeJob?.cancel()
+        historyResumeJob = null
     }
 
     /** Plays the series from where the viewer left it, as its button does. */

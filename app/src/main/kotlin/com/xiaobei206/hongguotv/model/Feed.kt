@@ -16,6 +16,10 @@ class Feed(
     private val scope: CoroutineScope,
     private val fetch: (suspend (cursor: String) -> FeedPage)?,
 ) {
+    companion object {
+        /** Maximum cursor-advancing pages to skip in one request batch. */
+        private const val MAX_PAGES_PER_BATCH = 8
+    }
     var cards by mutableStateOf(emptyList<Card>())
         private set
     private var seen = HashSet<String>()
@@ -93,7 +97,7 @@ class Feed(
         scope.launch {
             var fetchedPages = 0
             try {
-                while (fetchedPages < 4) {
+                while (fetchedPages < MAX_PAGES_PER_BATCH) {
                     val requested = requestCursor
                     val page = fetch(requested)
                     val added = add(page, requestCursor = requested)

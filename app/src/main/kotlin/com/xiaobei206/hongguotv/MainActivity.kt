@@ -26,6 +26,7 @@ import android.view.inputmethod.InputMethodManager
 import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.GridLayout
+import android.widget.HorizontalScrollView
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ScrollView
@@ -53,7 +54,11 @@ import com.xiaobei206.hongguotv.model.TimeControl
 import com.xiaobei206.hongguotv.model.friendly
 import com.xiaobei206.hongguotv.playback.PlaybackDiagnostics
 import com.xiaobei206.hongguotv.model.metaLine
+import com.xiaobei206.hongguotv.model.dayLabel
+import com.xiaobei206.hongguotv.model.todayKey
 import dev.openhongguo.Episode
+import dev.openhongguo.RankBoard
+import dev.openhongguo.RankContent
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.isActive
@@ -73,8 +78,10 @@ class MainActivity : ComponentActivity() {
     private var checkingForUpdate = false
     private var pendingInstallApk: File? = null
     private var feedPrefillJob: Job? = null
+    private var feedScrollLoadJob: Job? = null
     private var screen by mutableStateOf(Screen.HOME)
     private var parentScreen = Screen.HOME
+    private var searchReturnScreen = Screen.HOME
     private var currentFeed: Feed? = null
     private var currentSeries: SeriesPage? = null
     private var headerTitle = "推荐"
@@ -86,6 +93,7 @@ class MainActivity : ComponentActivity() {
     private lateinit var playerLayer: FrameLayout
     private lateinit var header: TextView
     private lateinit var subHeader: TextView
+    private lateinit var feedFilterHost: LinearLayout
     private lateinit var recycler: RecyclerView
     private lateinit var emptyState: TextView
     private lateinit var cardAdapter: TvCardAdapter
@@ -100,6 +108,7 @@ class MainActivity : ComponentActivity() {
     private lateinit var retryButton: TextView
     private lateinit var diagnosticButton: TextView
     private lateinit var progressText: TextView
+    private lateinit var playerFocusButtons: List<TextView>
     private var episodeDialog: AlertDialog? = null
 
     private val handler = Handler(Looper.getMainLooper())
@@ -110,6 +119,12 @@ class MainActivity : ComponentActivity() {
             playerControls.visibility = View.GONE
         }
     }
+
+    private data class FilterChoice(
+        val label: String,
+        val selected: Boolean,
+        val onClick: () -> Unit,
+    )
 
     private data class UiSnapshot(
         val cards: List<Card>,
@@ -126,6 +141,13 @@ class MainActivity : ComponentActivity() {
         val playerQualities: List<Int>,
         val favoritesCount: Int,
         val historyCount: Int,
+        val rankContents: List<RankContent>,
+        val rankBoards: List<RankBoard>,
+        val rankContent: String,
+        val rankBoard: String,
+        val currentRankContent: String,
+        val newDates: List<String>,
+        val newDate: String,
     )
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -198,6 +220,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun navigate(target: Screen) {
+        feedScrollLoadJob?.cancel()
         when (target) {
             Screen.HOME, Screen.RANK, Screen.NEW -> enterFeed(target)
             Screen.FAVORITES, Screen.HISTORY, Screen.DEVICE, Screen.SETTINGS -> {
@@ -215,6 +238,8 @@ class MainActivity : ComponentActivity() {
         val m = model ?: return
         feedPrefillJob?.cancel()
         feedPrefillJob = null
+        feedScrollLoadJob?.cancel()
+        feedScrollLoadJob = null
         parentScreen = target
         currentSeries = null
         currentFeed = when (target) {
@@ -264,7 +289,10 @@ class MainActivity : ComponentActivity() {
         column.addView(top)
         subHeader = text("方向键移动 · 确认打开 · 长按收藏", 16f, 0xffa7b2c2.toInt())
         column.addView(subHeader, LinearLayout.LayoutParams(-1, dp(30)))
+        feedFilterHost = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; visibility = View.GONE }
+        column.addView(feedFilterHost, LinearLayout.LayoutParams(-1, ViewGroup.LayoutParams.WRAP_CONTENT))
         recycler = RecyclerView(this).apply {
+            id = View.generateViewId()
             layoutManager = GridLayoutManager(this@MainActivity, gridColumns())
             adapter = cardAdapter
             setHasFixedSize(true)
@@ -279,8 +307,8 @@ class MainActivity : ComponentActivity() {
                     val feed = currentFeed ?: return
                     if (dy > 0 &&
                         manager.findLastVisibleItemPosition() >= manager.itemCount - gridColumns() * 3 &&
-                        feed.wantsMore && !feed.loading) {
-                        feed.loadMore()
+                        feed.wantsMore) {
+                        loadMoreAtEnd(rv, feed)
                     }
                 }
             })
@@ -304,11 +332,13 @@ class MainActivity : ComponentActivity() {
     /**
      * Ranking and new-release APIs return a page at a time. Populate roughly two
      * viewport-heights before asking the viewer to scroll, then let onScrolled
-     * keep a three-row buffer ahead during downward navigation.
+     * keep a three-row buffer ahead during downward navigation. Empty cursor-advancing
+     * batches are retried while the viewer remains near the end of the grid.
      */
     private fun scheduleInitialFeedPrefill(target: Screen, feed: Feed) {
         if (target != Screen.RANK && target != Screen.NEW) return
         feedPrefillJob?.cancel()
+        feedScrollLoadJob?.cancel()
         recycler.post {
             if (screen != target || currentFeed !== feed) return@post
             val rowExtent = dp(282).coerceAtLeast(1)
@@ -318,7 +348,7 @@ class MainActivity : ComponentActivity() {
                 var batches = 0
                 var stalledBatches = 0
                 while (isActive && screen == target && currentFeed === feed &&
-                    feed.cards.size < minimumItems && feed.wantsMore && batches < 6) {
+                    feed.cards.size < minimumItems && feed.wantsMore && batches < 12) {
                     val previousCount = feed.cards.size
                     if (!feed.loading) feed.loadMore()
                     val completed = withTimeoutOrNull(25_000L) {
@@ -335,7 +365,7 @@ class MainActivity : ComponentActivity() {
                     }
                     if (feed.cards.size <= previousCount) {
                         stalledBatches++
-                        if (!feed.wantsMore || stalledBatches >= 2) {
+                        if (!feed.wantsMore || stalledBatches >= 4) {
                             android.util.Log.w("HongguoTVFeed", "prefill stalled screen=$target cards=${feed.cards.size} batches=$batches more=${feed.wantsMore}")
                             break
                         }
@@ -349,6 +379,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun renderFeed(snapshot: UiSnapshot) {
+        renderFeedFilters(snapshot)
         cardAdapter.submit(snapshot.cards)
         val hasCards = snapshot.cards.isNotEmpty()
         emptyState.visibility = if (hasCards) View.GONE else View.VISIBLE
@@ -369,6 +400,128 @@ class MainActivity : ComponentActivity() {
                     else -> " · 长按海报收藏"
                 }
             else -> "红果内容通过网络加载 · 请确认电视已联网"
+        }
+    }
+
+    private fun renderFeedFilters(snapshot: UiSnapshot) {
+        feedFilterHost.removeAllViews()
+        val m = model ?: run { feedFilterHost.visibility = View.GONE; return }
+        when (screen) {
+            Screen.RANK -> {
+                if (snapshot.rankContents.isNotEmpty()) {
+                    addFilterRow(feedFilterHost, snapshot.rankContents.map { content ->
+                        FilterChoice(
+                            label = content.name.ifBlank { content.id },
+                            selected = snapshot.currentRankContent == content.id,
+                            onClick = {
+                                if (m.rankContent != content.id) {
+                                    m.rankContent = content.id
+                                    m.rankBoard = ""
+                                    enterFeed(Screen.RANK)
+                                }
+                            },
+                        )
+                    })
+                    if (snapshot.rankBoards.isNotEmpty()) {
+                        val choices = ArrayList<FilterChoice>()
+                        choices += FilterChoice("默认", snapshot.rankBoard.isEmpty()) {
+                            if (m.rankBoard.isNotEmpty()) {
+                                m.rankBoard = ""
+                                enterFeed(Screen.RANK)
+                            }
+                        }
+                        snapshot.rankBoards.forEach { board ->
+                            choices += FilterChoice(
+                                label = board.name.ifBlank { board.id },
+                                selected = board.id == snapshot.rankBoard ||
+                                    (snapshot.rankBoard.isEmpty() && board.selected),
+                                onClick = {
+                                    if (m.rankBoard != board.id) {
+                                        m.rankBoard = board.id
+                                        enterFeed(Screen.RANK)
+                                    }
+                                },
+                            )
+                        }
+                        addFilterRow(feedFilterHost, choices)
+                    }
+                }
+            }
+            Screen.NEW -> {
+                val today = todayKey()
+                val dates = (listOf(today) + snapshot.newDates).distinct()
+                addFilterRow(feedFilterHost, dates.map { date ->
+                    FilterChoice(
+                        label = dayLabel(date, today),
+                        selected = m.dayIsOn(date),
+                        onClick = {
+                            if (!m.dayIsOn(date)) {
+                                m.chooseDay(date)
+                                enterFeed(Screen.NEW)
+                            }
+                        },
+                    )
+                })
+            }
+            else -> Unit
+        }
+        feedFilterHost.visibility = if (feedFilterHost.childCount > 0) View.VISIBLE else View.GONE
+    }
+
+    private fun addFilterRow(parent: LinearLayout, choices: List<FilterChoice>) {
+        if (choices.isEmpty()) return
+        val scroll = HorizontalScrollView(this).apply {
+            isHorizontalScrollBarEnabled = false
+            isFocusable = false
+            clipToPadding = false
+        }
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        val buttons = choices.map { choice ->
+            navButton(choice.label) { choice.onClick() }.apply {
+                isSelected = choice.selected
+                textSize = 16f
+                minWidth = dp(88)
+            }.also { button ->
+                row.addView(button, LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT, dp(42),
+                ).apply { rightMargin = dp(8) })
+            }
+        }
+        buttons.forEachIndexed { index, button ->
+            button.nextFocusLeftId = buttons.getOrNull(index - 1)?.id ?: button.id
+            button.nextFocusRightId = buttons.getOrNull(index + 1)?.id ?: button.id
+        }
+        scroll.addView(row, HorizontalScrollView.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.MATCH_PARENT,
+        ))
+        parent.addView(scroll, LinearLayout.LayoutParams(-1, dp(48)))
+    }
+
+    private fun loadMoreAtEnd(rv: RecyclerView, feed: Feed) {
+        if (feedScrollLoadJob?.isActive == true) return
+        feedScrollLoadJob = lifecycleScope.launch {
+            var emptyBatches = 0
+            while (isActive && screen in setOf(Screen.HOME, Screen.RANK, Screen.NEW, Screen.SEARCH) &&
+                currentFeed === feed && recycler === rv && feed.wantsMore) {
+                val manager = rv.layoutManager as? GridLayoutManager ?: break
+                val lastVisible = manager.findLastVisibleItemPosition()
+                if (manager.itemCount > 0 && lastVisible < manager.itemCount - gridColumns() * 3) break
+                val previousCount = feed.cards.size
+                if (!feed.loading) feed.loadMore()
+                val completed = withTimeoutOrNull(25_000L) {
+                    snapshotFlow { feed.loading }.first { !it }
+                } != null
+                if (!completed || feed.error != null) break
+                if (feed.cards.size > previousCount) break
+                emptyBatches++
+                if (emptyBatches >= 4) {
+                    android.util.Log.w("HongguoTVFeed", "scroll pagination paused after $emptyBatches empty batches; cursor still available")
+                    break
+                }
+            }
         }
     }
 
@@ -410,6 +563,9 @@ class MainActivity : ComponentActivity() {
 
     private fun doSearch(query: String) {
         val m = model ?: return
+        if (screen != Screen.SEARCH) searchReturnScreen = screen
+        feedPrefillJob?.cancel()
+        feedScrollLoadJob?.cancel()
         currentFeed = m.searchFeed(query)
         headerTitle = "搜索：$query"
         screen = Screen.SEARCH
@@ -418,6 +574,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun onCardSelected(card: Card) {
+        feedScrollLoadJob?.cancel()
         if (screen == Screen.HISTORY) {
             val m = model ?: return
             feedPrefillJob?.cancel()
@@ -435,6 +592,8 @@ class MainActivity : ComponentActivity() {
         val m = model ?: return
         feedPrefillJob?.cancel()
         feedPrefillJob = null
+        feedScrollLoadJob?.cancel()
+        feedScrollLoadJob = null
         parentScreen = screen
         currentSeries = m.seriesPage(card.id, restartIfLoading = true)
         screen = Screen.DETAIL
@@ -552,6 +711,7 @@ class MainActivity : ComponentActivity() {
     private fun buildPlayerLayer() {
         playerLayer.removeAllViews()
         playerView = PlayerView(this).apply {
+            id = View.generateViewId()
             player = tvApp.video.exo
             useController = false
             setShowBuffering(PlayerView.SHOW_BUFFERING_ALWAYS)
@@ -610,6 +770,8 @@ class MainActivity : ComponentActivity() {
         playerMessage = text("", 15f, 0xffffc77f.toInt())
         playerControls.addView(playerMessage, LinearLayout.LayoutParams(-1, dp(28)))
         playerSeek = SeekBar(this).apply {
+            id = View.generateViewId()
+            isFocusable = true
             max = 1000
             progressTintList = android.content.res.ColorStateList.valueOf(0xffffb45c.toInt())
             thumbTintList = android.content.res.ColorStateList.valueOf(0xffffb45c.toInt())
@@ -640,16 +802,28 @@ class MainActivity : ComponentActivity() {
         row.addView(speedButton, LinearLayout.LayoutParams(dp(108), dp(46)).apply { rightMargin = dp(7) })
         row.addView(qualityButton, LinearLayout.LayoutParams(dp(90), dp(46)))
         val focusButtons = listOf(playButton, previousEpisodeButton, nextEpisodeButton, episodeSelectButton, speedButton, qualityButton)
+        playerFocusButtons = focusButtons
+        playerView.nextFocusUpId = playButton.id
+        playerView.nextFocusDownId = playerSeek.id
+        playerSeek.nextFocusUpId = playerView.id
+        playerSeek.nextFocusDownId = playButton.id
+        playButton.nextFocusUpId = playerSeek.id
         focusButtons.forEachIndexed { index, button ->
             button.nextFocusLeftId = focusButtons[(index - 1 + focusButtons.size) % focusButtons.size].id
             button.nextFocusRightId = focusButtons[(index + 1) % focusButtons.size].id
+            button.nextFocusUpId = playerSeek.id
+            button.nextFocusDownId = button.id
         }
         playerControls.addView(row)
         retryButton = navButton("重试播放") { model?.player?.retry() }
         retryButton.visibility = View.GONE
+        retryButton.nextFocusUpId = playButton.id
+        retryButton.nextFocusDownId = retryButton.id
         playerControls.addView(retryButton, LinearLayout.LayoutParams(dp(140), dp(42)).apply { topMargin = dp(6) })
         diagnosticButton = navButton("发送诊断到手机") { sendPlaybackDiagnosticsToPhones() }
         diagnosticButton.visibility = View.GONE
+        diagnosticButton.nextFocusUpId = retryButton.id
+        diagnosticButton.nextFocusDownId = diagnosticButton.id
         playerControls.addView(diagnosticButton, LinearLayout.LayoutParams(dp(190), dp(42)).apply { topMargin = dp(6) })
         playerLayer.addView(playerControls, FrameLayout.LayoutParams(-1, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM))
         bindPlayerMediaKeys(playerControls)
@@ -705,8 +879,8 @@ class MainActivity : ComponentActivity() {
         shell.visibility = View.GONE
         playerLayer.visibility = View.VISIBLE
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        renderPlayerState()
         playerControls.visibility = View.GONE
+        renderPlayerState()
         playerView.requestFocus()
         progressTask?.let(handler::removeCallbacks)
         val task = object : Runnable {
@@ -736,6 +910,7 @@ class MainActivity : ComponentActivity() {
         val failed = player.state as? PlayerState.Failed
         retryButton.visibility = if (failed != null) View.VISIBLE else View.GONE
         diagnosticButton.visibility = if (failed != null) View.VISIBLE else View.GONE
+        playerFocusButtons.forEach { it.nextFocusDownId = if (failed != null) retryButton.id else it.id }
         if (failed != null) {
             playerControls.visibility = View.VISIBLE
             handler.removeCallbacks(hideControls)
@@ -868,6 +1043,7 @@ class MainActivity : ComponentActivity() {
 
     private fun leavePlayer() {
         handler.removeCallbacks(hideControls)
+        model?.cancelPendingHistoryResume()
         model?.player?.leave()
         progressTask?.let(handler::removeCallbacks)
         screen = parentScreen
@@ -1095,7 +1271,8 @@ class MainActivity : ComponentActivity() {
     private fun makeSnapshot(): UiSnapshot {
         val m = model
         if (m == null) return UiSnapshot(emptyList(), false, tvApp.startupError, null, emptyList(),
-            false, tvApp.startupError, PlayerState.Idle, 0, 1f, 0, emptyList(), 0, 0)
+            false, tvApp.startupError, PlayerState.Idle, 0, 1f, 0, emptyList(), 0, 0,
+            emptyList(), emptyList(), "", "", "", emptyList(), "")
         val cards = when (screen) {
             Screen.FAVORITES -> m.favorites.cards
             Screen.HISTORY -> m.history.list.map {
@@ -1110,6 +1287,8 @@ class MainActivity : ComponentActivity() {
             page?.series, page?.episodes.orEmpty(), page?.loading == true, page?.error?.let(::friendly).orEmpty(),
             m.player.state, m.player.number, m.player.speed, m.player.quality, m.player.qualities,
             m.favorites.list.size, m.history.list.size,
+            m.chartContents, m.rankBoards, m.rankContent, m.rankBoard, m.currentRankContent,
+            m.newDates, m.newDate,
         )
     }
 
@@ -1155,7 +1334,12 @@ class MainActivity : ComponentActivity() {
                 showShell()
                 currentFeed?.let { feed -> scheduleInitialFeedPrefill(screen, feed) }
             }
-            Screen.SEARCH -> { screen = parentScreen; currentFeed = feedFor(parentScreen); showShell() }
+            Screen.SEARCH -> {
+                screen = searchReturnScreen
+                currentFeed = feedFor(searchReturnScreen)
+                showShell()
+                currentFeed?.let { feed -> scheduleInitialFeedPrefill(screen, feed) }
+            }
             Screen.HOME -> super.onBackPressed()
             else -> enterFeed(Screen.HOME)
         }

@@ -38,6 +38,30 @@ class FeedPaginationTest {
     }
 
     @Test
+    fun skipsLongEmptyRunWithinOneBoundedBatch() {
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
+        val requested = mutableListOf<String>()
+        val feed = Feed(scope) { cursor ->
+            requested += cursor
+            val page = requested.size
+            if (page <= 6) {
+                FeedPage(emptyList(), cursor = "cursor-$page", more = true)
+            } else {
+                FeedPage(listOf(Card("found", "终于找到作品")), cursor = "cursor-$page", more = true)
+            }
+        }
+
+        try {
+            feed.loadMore()
+            assertEquals(7, requested.size)
+            assertEquals("found", feed.cards.single().id)
+            assertTrue(feed.wantsMore)
+        } finally {
+            scope.cancel()
+        }
+    }
+
+    @Test
     fun stopsWhenServerClaimsMoreButDoesNotAdvanceCursor() {
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
         var requests = 0

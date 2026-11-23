@@ -54,8 +54,8 @@ jobs:
 
       - name: Install Android 16 SDK
         run: |
-          sdkmanager "platforms;android-36" "build-tools;36.0.0" "ndk;27.2.12479018"
-          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/27.2.12479018" >> "$GITHUB_ENV"
+          sdkmanager "platforms;android-36" "build-tools;36.0.0" "ndk;28.2.13676358"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/28.2.13676358" >> "$GITHUB_ENV"
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
 
       - name: Patch, test and build the shared openhongguo Android AAR
@@ -143,6 +143,39 @@ jobs:
           else
             echo "No Android Lint text report was generated."
           fi
+
+      - name: Verify 16 KB native-library and APK alignment
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK="app/build/outputs/apk/release/app-release.apk"
+          TEMP="$(mktemp -d)"
+          trap 'rm -rf "$TEMP"' EXIT
+          unzip -q "$APK" 'lib/*/*.so' -d "$TEMP"
+          READELF="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf"
+          count=0
+          while IFS= read -r -d '' LIB; do
+            count=$((count + 1))
+            ALIGNMENTS="$("$READELF" -lW "$LIB" | awk '$1 == "LOAD" { print $NF }')"
+            if [[ -z "$ALIGNMENTS" ]]; then
+              echo "No LOAD segments found in $LIB" >&2
+              exit 1
+            fi
+            while IFS= read -r ALIGN; do
+              [[ "$ALIGN" =~ ^0x[0-9a-fA-F]+$ ]] || {
+                echo "Unrecognized ELF alignment '$ALIGN' in $LIB" >&2
+                exit 1
+              }
+              VALUE=$((ALIGN))
+              if (( VALUE < 16384 || VALUE % 16384 != 0 )); then
+                echo "ELF LOAD segment is not 16 KB aligned: $LIB ($ALIGN)" >&2
+                exit 1
+              fi
+            done <<< "$ALIGNMENTS"
+            echo "16 KB ELF alignment verified: ${LIB#"$TEMP"/}"
+          done < <(find "$TEMP/lib" -type f -name '*.so' -print0)
+          test "$count" -gt 0
+          "$ANDROID_HOME/build-tools/36.0.0/zipalign" -c -P 16 -v 4 "$APK"
 
       - name: Verify package metadata and APK signature
         id: verify
