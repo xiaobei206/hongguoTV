@@ -263,6 +263,13 @@ class MainActivity : ComponentActivity() {
         frame.addView(emptyState, FrameLayout.LayoutParams(-1, -1))
         column.addView(frame, LinearLayout.LayoutParams(-1, 0, 1f))
         contentHost.addView(column, FrameLayout.LayoutParams(-1, -1))
+        recycler.post {
+            if (cardAdapter.itemCount > 0) {
+                recycler.findViewHolderForAdapterPosition(0)?.itemView?.requestFocus()
+            } else {
+                rail.getChildAt(1)?.requestFocus()
+            }
+        }
     }
 
     private fun renderFeed(snapshot: UiSnapshot) {
@@ -436,9 +443,11 @@ class MainActivity : ComponentActivity() {
                 when (keyCode) {
                     KeyEvent.KEYCODE_DPAD_LEFT -> { model?.player?.skip(-10.0); revealPlayerControls(); true }
                     KeyEvent.KEYCODE_DPAD_RIGHT -> { model?.player?.skip(10.0); revealPlayerControls(); true }
-                    KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_MENU -> { revealPlayerControls(); true }
+                    KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_MENU -> { revealPlayerControls(); playButton.requestFocus(); true }
                     KeyEvent.KEYCODE_DPAD_DOWN -> { openEpisodeDialog(); true }
                     KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER, KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE -> { togglePlayerPause(); revealPlayerControls(); true }
+                    KeyEvent.KEYCODE_MEDIA_PLAY -> { model?.player?.video?.play(); revealPlayerControls(); true }
+                    KeyEvent.KEYCODE_MEDIA_PAUSE -> { model?.player?.video?.pause(); revealPlayerControls(); true }
                     KeyEvent.KEYCODE_BACK -> { leavePlayer(); true }
                     else -> false
                 }
