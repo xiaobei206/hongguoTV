@@ -165,7 +165,8 @@ internal fun TvDetailScreen(
                                 fontSize = 13.sp,
                             )
                         }
-                    }                }
+                    }
+                }
                 Spacer(Modifier.height(20.dp))
                 Text(
                     text = "剧情简介",
