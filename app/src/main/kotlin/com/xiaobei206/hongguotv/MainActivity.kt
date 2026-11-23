@@ -343,35 +343,47 @@ class MainActivity : ComponentActivity() {
 
     private fun buildDetailContent() {
         contentHost.removeAllViews()
-        val scroll = ScrollView(this).apply { isFillViewport = true }
-        val column = LinearLayout(this).apply {
+        val layout = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        val leftScroll = ScrollView(this).apply { isFillViewport = true }
+        val left = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(24), dp(18), dp(24), dp(24))
+            setPadding(dp(20), dp(14), dp(20), dp(20))
         }
-        header = text("剧集详情", 28f, Color.WHITE, true)
-        column.addView(header)
-        subHeader = text("正在读取剧集信息…", 16f, 0xffa7b2c2.toInt())
-        column.addView(subHeader, LinearLayout.LayoutParams(-1, dp(42)))
-        val actions = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            tag = "detail-actions"
-        }
-        column.addView(actions)
+        header = text("剧集详情", 26f, Color.WHITE, true)
+        left.addView(header, LinearLayout.LayoutParams(-1, dp(48)))
+        subHeader = text("正在读取剧集信息…", 15f, 0xffa7b2c2.toInt())
+        left.addView(subHeader, LinearLayout.LayoutParams(-1, dp(38)))
         val poster = ImageView(this).apply {
             scaleType = ImageView.ScaleType.CENTER_CROP
             tag = "detail-cover"
             setBackgroundColor(0xff243449.toInt())
         }
-        column.addView(poster, LinearLayout.LayoutParams(dp(160), dp(220)).apply {
+        left.addView(poster, LinearLayout.LayoutParams(dp(170), dp(230)).apply {
             topMargin = dp(12); bottomMargin = dp(12)
         })
-        column.addView(text("剧情简介", 20f, Color.WHITE, true))
-        val description = text("", 16f, 0xffd2d9e2.toInt()).apply { tag = "detail-description" }
-        column.addView(description, LinearLayout.LayoutParams(-1, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
-            bottomMargin = dp(18)
+        left.addView(text("剧情简介", 19f, Color.WHITE, true))
+        val description = text("", 15f, 0xffd2d9e2.toInt()).apply {
+            tag = "detail-description"
+            maxLines = 7
+            ellipsize = android.text.TextUtils.TruncateAt.END
+        }
+        left.addView(description, LinearLayout.LayoutParams(-1, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+            topMargin = dp(6); bottomMargin = dp(14)
         })
-        column.addView(text("选集", 21f, Color.WHITE, true), LinearLayout.LayoutParams(-1, dp(40)))
+        val actions = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            tag = "detail-actions"
+        }
+        left.addView(actions, LinearLayout.LayoutParams(-1, ViewGroup.LayoutParams.WRAP_CONTENT))
+        leftScroll.addView(left, ScrollView.LayoutParams(-1, ViewGroup.LayoutParams.WRAP_CONTENT))
+
+        val right = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(12), dp(16), dp(12), dp(12))
+        }
+        right.addView(text("选择剧集", 22f, Color.WHITE, true), LinearLayout.LayoutParams(-1, dp(48)))
+        right.addView(text("方向键移动 · 确认播放 · 返回上一页", 13f, 0xffa7b2c2.toInt()),
+            LinearLayout.LayoutParams(-1, dp(28)))
         val episodes = RecyclerView(this).apply {
             tag = "detail-episodes"
             layoutManager = GridLayoutManager(this@MainActivity, 8)
@@ -380,11 +392,13 @@ class MainActivity : ComponentActivity() {
                 if (episode.playable) startPlayer(id, episode.number, 0.0) else toast("这一集暂不可播放")
             }
             setHasFixedSize(true)
-            isNestedScrollingEnabled = false
+            setItemViewCacheSize(8)
+            overScrollMode = View.OVER_SCROLL_NEVER
         }
-        column.addView(episodes, LinearLayout.LayoutParams(-1, dp(330)))
-        scroll.addView(column)
-        contentHost.addView(scroll, FrameLayout.LayoutParams(-1, -1))
+        right.addView(episodes, LinearLayout.LayoutParams(-1, 0, 1f))
+        layout.addView(leftScroll, LinearLayout.LayoutParams(0, -1, 4f))
+        layout.addView(right, LinearLayout.LayoutParams(0, -1, 6f))
+        contentHost.addView(layout, FrameLayout.LayoutParams(-1, -1))
     }
 
     private fun renderDetail(snapshot: UiSnapshot) {
@@ -395,7 +409,8 @@ class MainActivity : ComponentActivity() {
             snapshot.detailError.isNotBlank() -> snapshot.detailError
             else -> "正在加载剧集信息…"
         }
-        contentHost.findViewWithTag<TextView>("detail-description")?.text = snapshot.series?.description.orEmpty()
+        val description = contentHost.findViewWithTag<TextView>("detail-description")
+        description?.text = snapshot.series?.description.orEmpty()
         val poster = contentHost.findViewWithTag<ImageView>("detail-cover")
         if (snapshot.series != null && poster != null && poster.tag != snapshot.series.coverUrl) {
             poster.tag = snapshot.series.coverUrl
@@ -405,20 +420,22 @@ class MainActivity : ComponentActivity() {
         if (actions.childCount == 0 && snapshot.series != null) {
             val series = snapshot.series
             val resume = model?.resumePoint(page)
-            actions.addView(navButton(resume?.label ?: "播放第 1 集") {
+            val play = navButton(resume?.label ?: "播放第 1 集") {
                 if (resume != null) startPlayer(resume.seriesID, resume.number, resume.start)
                 else startPlayer(page.id, 1, 0.0)
-            }, LinearLayout.LayoutParams(dp(210), dp(48)))
-            val favoriteButton = navButton("☆ 收藏") {}
-            favoriteButton.setOnClickListener {
-                val added = model?.favorites?.toggle(Fav.of(Card.of(series))) == true
-                toast(if (added) "已收藏" else "已取消收藏")
-                favoriteButton.text = if (added) "★ 已收藏" else "☆ 收藏"
             }
-            actions.addView(favoriteButton,
-                LinearLayout.LayoutParams(dp(140), dp(48)).apply { leftMargin = dp(12) })
+            actions.addView(play, LinearLayout.LayoutParams(-1, dp(48)).apply { bottomMargin = dp(8) })
+            val favorite = navButton(if (model?.favorites?.has(page.id) == true) "★ 已收藏" else "☆ 收藏") {}
+            favorite.setOnClickListener {
+                val added = model?.favorites?.toggle(Fav.of(Card.of(series))) == true
+                favorite.text = if (added) "★ 已收藏" else "☆ 收藏"
+                toast(if (added) "已收藏" else "已取消收藏")
+            }
+            actions.addView(favorite, LinearLayout.LayoutParams(-1, dp(48)))
+            play.requestFocus()
         } else if (actions.childCount == 0 && snapshot.detailError.isNotBlank()) {
-            actions.addView(navButton("重新加载") { model?.loadSeries(page) })
+            actions.addView(navButton("重新加载") { model?.loadSeries(page) },
+                LinearLayout.LayoutParams(-1, dp(48)))
         }
         val adapter = contentHost.findViewWithTag<RecyclerView>("detail-episodes")?.adapter as? TvEpisodeAdapter
         adapter?.submit(snapshot.episodes, model?.player?.number ?: 0)
