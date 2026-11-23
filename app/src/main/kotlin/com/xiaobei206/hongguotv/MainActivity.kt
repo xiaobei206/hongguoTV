@@ -1197,6 +1197,16 @@ class MainActivity : ComponentActivity() {
             }
             Screen.SEARCH -> {
                 screen = searchReturnScreen
+                headerTitle = when (screen) {
+                    Screen.HOME -> "推荐"
+                    Screen.RANK -> "排行榜"
+                    Screen.NEW -> "新剧上线"
+                    Screen.FAVORITES -> "我的收藏"
+                    Screen.HISTORY -> "观看历史"
+                    Screen.DEVICE -> "设备兼容性诊断"
+                    Screen.SETTINGS -> "设置"
+                    else -> headerTitle
+                }
                 currentFeed = feedFor(searchReturnScreen)
                 showShell()
             }
