@@ -60,6 +60,8 @@ import dev.openhongguo.Episode
 import dev.openhongguo.RankBoard
 import dev.openhongguo.RankContent
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withTimeoutOrNull
@@ -78,6 +80,8 @@ class MainActivity : ComponentActivity() {
     private var parentScreen = Screen.HOME
     private var searchReturnScreen = Screen.HOME
     private var currentFeed: Feed? = null
+    private var feedPrefillJob: Job? = null
+    private var feedScrollLoadJob: Job? = null
     private var currentSeries: SeriesPage? = null
     private var headerTitle = "推荐"
     private var renderedScreen: Screen? = null
@@ -259,6 +263,7 @@ class MainActivity : ComponentActivity() {
         when (target) {
             Screen.HOME, Screen.RANK, Screen.NEW -> enterFeed(target)
             Screen.FAVORITES, Screen.HISTORY, Screen.DEVICE, Screen.SETTINGS -> {
+                cancelFeedPaginationJobs()
                 parentScreen = Screen.HOME
                 currentFeed = null
                 screen = target
@@ -288,6 +293,7 @@ class MainActivity : ComponentActivity() {
         screen = target
         currentFeed?.let { if (!it.started || it.stale) it.loadMore() }
         showShell()
+        currentFeed?.let { scheduleInitialFeedFill(target, it) }
     }
 
     private fun showShell() {
@@ -540,16 +546,115 @@ class MainActivity : ComponentActivity() {
         parent.addView(scroll, LinearLayout.LayoutParams(-1, dp(48)))
     }
 
-    /** Match 开心果 FeedGrid: request one page when 10 items or fewer remain. */
+    /**
+     * Fill at least two visible screens in the background. Cards already returned
+     * stay on screen; this job never blocks rendering while it asks for later pages.
+     */
+    private fun scheduleInitialFeedFill(target: Screen, feed: Feed) {
+        if (target !in setOf(Screen.HOME, Screen.RANK, Screen.NEW, Screen.SEARCH)) return
+        feedPrefillJob?.cancel()
+        feedPrefillJob = null
+        feedScrollLoadJob?.cancel()
+        feedScrollLoadJob = null
+        recycler.post {
+            if (screen != target || currentFeed !== feed || isFinishing) return@post
+            val columns = gridColumns().coerceAtLeast(1)
+            val rowsPerScreen = (recycler.height / dp(330)).coerceAtLeast(2)
+            val targetCards = (columns * rowsPerScreen * 2).coerceAtLeast(columns * 4).coerceAtMost(48)
+            feedPrefillJob = lifecycleScope.launch {
+                var pages = 0
+                var stalledPages = 0
+                android.util.Log.d("HongguoTVFeed", "initial fill start screen=$target cards=${feed.cards.size} target=$targetCards")
+                while (screen == target && currentFeed === feed && pages < MAX_INITIAL_FEED_PAGES &&
+                    feed.wantsMore && feed.cards.size < targetCards) {
+                    if (feed.loading && !awaitFeedIdle(feed)) {
+                        android.util.Log.w("HongguoTVFeed", "initial fill timed out waiting for current page screen=$target cards=${feed.cards.size}")
+                        break
+                    }
+                    if (feed.error != null) {
+                        android.util.Log.w("HongguoTVFeed", "initial fill stopped on error screen=$target error=${feed.error}")
+                        break
+                    }
+                    if (!feed.wantsMore || feed.cards.size >= targetCards) break
+                    val before = feed.cards.size
+                    feed.loadMore()
+                    if (!awaitFeedIdle(feed)) {
+                        android.util.Log.w("HongguoTVFeed", "initial fill page timeout screen=$target page=$pages cards=${feed.cards.size}")
+                        break
+                    }
+                    pages++
+                    if (feed.error != null) {
+                        android.util.Log.w("HongguoTVFeed", "initial fill page failed screen=$target error=${feed.error}")
+                        break
+                    }
+                    if (feed.cards.size > before) stalledPages = 0 else stalledPages++
+                    android.util.Log.d("HongguoTVFeed", "initial fill page=$pages cards=${feed.cards.size}/$targetCards more=${feed.wantsMore} stalled=$stalledPages")
+                    if (stalledPages >= MAX_STALLED_FEED_PAGES) {
+                        android.util.Log.w("HongguoTVFeed", "initial fill stopped after $stalledPages pages without new cards screen=$target")
+                        break
+                    }
+                    if (feed.wantsMore && feed.cards.size < targetCards) delay(FEED_INTERPAGE_RENDER_DELAY_MS)
+                }
+                if (screen == target && currentFeed === feed) {
+                    android.util.Log.d("HongguoTVFeed", "initial fill finished screen=$target cards=${feed.cards.size}/$targetCards more=${feed.wantsMore} pages=$pages")
+                    if (feed.cards.isNotEmpty()) recycler.post { maybeLoadMoreAtEnd(recycler, feed) }
+                }
+            }
+        }
+    }
+
+    /** Wait without blocking the UI thread for the current page to finish. */
+    private suspend fun awaitFeedIdle(feed: Feed): Boolean =
+        withTimeoutOrNull(FEED_PAGE_TIMEOUT_MS) { snapshotFlow { feed.loading }.first { !it } } != null
+
+    private fun cancelFeedPaginationJobs() {
+        feedPrefillJob?.cancel()
+        feedPrefillJob = null
+        feedScrollLoadJob?.cancel()
+        feedScrollLoadJob = null
+    }
+
+    /** Request more when near the end, continuing across short/empty pages safely. */
     private fun maybeLoadMoreAtEnd(rv: RecyclerView, feed: Feed) {
         if (recycler !== rv || currentFeed !== feed ||
             screen !in setOf(Screen.HOME, Screen.RANK, Screen.NEW, Screen.SEARCH) ||
-            feed.loading || !feed.wantsMore) return
+            feed.loading || !feed.wantsMore || feedPrefillJob?.isActive == true ||
+            feedScrollLoadJob?.isActive == true) return
         val manager = rv.layoutManager as? GridLayoutManager ?: return
         val total = manager.itemCount
         val lastVisible = manager.findLastVisibleItemPosition()
-        if (total > 0 && lastVisible >= 0 && lastVisible >= total - 10) {
-            feed.loadMore()
+        val nearEnd = if (feed.cards.isEmpty()) total == 0
+            else total > 0 && lastVisible >= 0 && lastVisible >= total - 10
+        if (!nearEnd) return
+        feedScrollLoadJob = lifecycleScope.launch {
+            var pages = 0
+            var stalledPages = 0
+            while (pages < MAX_SCROLL_FEED_PAGES && currentFeed === feed && recycler === rv &&
+                screen in setOf(Screen.HOME, Screen.RANK, Screen.NEW, Screen.SEARCH) && feed.wantsMore) {
+                if (feed.loading && !awaitFeedIdle(feed)) break
+                if (feed.error != null || !feed.wantsMore) break
+                val currentManager = rv.layoutManager as? GridLayoutManager ?: break
+                val currentTotal = currentManager.itemCount
+                val currentLast = currentManager.findLastVisibleItemPosition()
+                val stillNearEnd = if (feed.cards.isEmpty()) currentTotal == 0
+                    else currentTotal > 0 && currentLast >= 0 && currentLast >= currentTotal - 10
+                if (!stillNearEnd) break
+                val before = feed.cards.size
+                feed.loadMore()
+                if (!awaitFeedIdle(feed)) {
+                    android.util.Log.w("HongguoTVFeed", "scroll pagination timed out screen=$screen cards=${feed.cards.size}")
+                    break
+                }
+                pages++
+                if (feed.error != null) break
+                if (feed.cards.size > before) stalledPages = 0 else stalledPages++
+                android.util.Log.d("HongguoTVFeed", "scroll page=$pages cards=${feed.cards.size} more=${feed.wantsMore} stalled=$stalledPages")
+                if (stalledPages >= MAX_STALLED_FEED_PAGES) {
+                    android.util.Log.w("HongguoTVFeed", "scroll pagination paused after $stalledPages pages without new cards")
+                    break
+                }
+                if (feed.wantsMore) delay(FEED_INTERPAGE_RENDER_DELAY_MS)
+            }
         }
     }
 
@@ -597,9 +702,11 @@ class MainActivity : ComponentActivity() {
         screen = Screen.SEARCH
         currentFeed?.loadMore()
         showShell()
+        currentFeed?.let { scheduleInitialFeedFill(Screen.SEARCH, it) }
     }
 
     private fun onCardSelected(card: Card) {
+        cancelFeedPaginationJobs()
         if (screen == Screen.HISTORY) {
             val m = model ?: return
             parentScreen = Screen.HISTORY
@@ -1353,11 +1460,13 @@ class MainActivity : ComponentActivity() {
                 screen = parentScreen
                 currentSeries = null
                 showShell()
+                currentFeed?.let { scheduleInitialFeedFill(screen, it) }
             }
             Screen.SEARCH -> {
                 screen = searchReturnScreen
                 currentFeed = feedFor(searchReturnScreen)
                 showShell()
+                currentFeed?.let { scheduleInitialFeedFill(screen, it) }
             }
             Screen.HOME -> super.onBackPressed()
             else -> enterFeed(Screen.HOME)
@@ -1519,5 +1628,10 @@ class MainActivity : ComponentActivity() {
 
     companion object {
         private const val REQUEST_INSTALL_PERMISSION = 7314
+        private const val FEED_PAGE_TIMEOUT_MS = 25_000L
+        private const val FEED_INTERPAGE_RENDER_DELAY_MS = 100L
+        private const val MAX_INITIAL_FEED_PAGES = 12
+        private const val MAX_SCROLL_FEED_PAGES = 8
+        private const val MAX_STALLED_FEED_PAGES = 4
     }
 }
