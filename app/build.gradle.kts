@@ -7,6 +7,10 @@ plugins {
 }
 
 val patchedOpenhongguoAar = providers.gradleProperty("patchedOpenhongguoAar").orNull
+val patchedOpenhongguoAarFile = patchedOpenhongguoAar?.let { rootProject.file(it) }
+if (patchedOpenhongguoAar != null && patchedOpenhongguoAarFile?.isFile != true) {
+    throw GradleException("patchedOpenhongguoAar was supplied but the AAR does not exist: $patchedOpenhongguoAar")
+}
 
 val signingFile = rootProject.file("hongguoTV-release.jks")
 val signingSecrets = Properties().apply {
@@ -26,8 +30,8 @@ android {
         applicationId = "com.xiaobei206.hongguotv"
         minSdk = 23
         targetSdk = 35
-        versionCode = 19
-        versionName = "1.1.8"
+        versionCode = 20
+        versionName = "1.1.9"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
@@ -96,7 +100,7 @@ dependencies {
     implementation("androidx.media3:media3-ui:1.8.1")
     implementation("androidx.media3:media3-session:1.8.1")
     if (patchedOpenhongguoAar != null) {
-        implementation(files(patchedOpenhongguoAar))
+        implementation(files(patchedOpenhongguoAarFile))
     } else {
         implementation("io.github.beilunyang:openhongguo:0.4.0")
     }
@@ -105,4 +109,21 @@ dependencies {
 
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.json:json:20250517")
+}
+
+
+// The Maven dependency is only a classpath fallback for IDE sync. Never create
+// an APK or Android App Bundle from it: published artifacts must use the
+// pinned, patched SDK AAR built from xiaobei206/openhongguo.
+tasks.configureEach {
+    if (name.startsWith("package") || name.startsWith("bundle")) {
+        doFirst {
+            if (patchedOpenhongguoAarFile?.isFile != true) {
+                throw GradleException(
+                    "Refusing to package hongguoTV with Maven openhongguo 0.4.0. " +
+                        "Build the pinned Android AAR and pass -PpatchedOpenhongguoAar=<path>."
+                )
+            }
+        }
+    }
 }
