@@ -1,5 +1,16 @@
 # 更新日志
 
+## [1.1.9] - 2026-11-24
+
+### 固定并保护 Android SDK 构建链
+- 核对当前电视正式构建：Android CI 从 `xiaobei206/openhongguo` 固定提交 `1e9334185a46033bcc4e3e30fc41f649958b1389` 构建 AAR；Go SDK 回归测试覆盖 V5 HTTP 200 空响应后回退 `video_tab`，以及 `video_tab` 空响应后回退旧接口。
+- 将开心果共享 SDK 补丁固定到提交 `7acbf7c5f12723431702c1005bcd110470ee3976`，不再随其 `main` 漂移；补丁也确保空响应不会被误判为设备拒绝而轮换匿名身份。
+- 修复本地 Gradle 打包路径：Maven `openhongguo 0.4.0` 仅保留 IDE 同步时的 classpath 兜底；没有传入上述固定 AAR 时，APK / AAB 打包任务直接失败，避免意外生成使用旧 SDK 的安装包。
+- README 更新本地构建步骤；正式 Release 仍使用相同的固定 SDK AAR，并执行 Go SDK 测试、Android 单测、Lint、Release 构建、签名与 16 KB 对齐验证。
+
+### 验证说明
+- 以本次 GitHub Actions 的 Go SDK 回归测试、Android 单元测试、Lint、正式 APK 构建及 16 KB 对齐结果为准；真实电视播放仍需实机验收。
+
 ## [1.1.8] - 2026-11-24
 
 ### 恢复 100 部后台预载与默认栏目预热
