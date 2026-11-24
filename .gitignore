@@ -10,3 +10,4 @@ captures/
 *.aab
 *.log
 .DS_Store
+.build/
