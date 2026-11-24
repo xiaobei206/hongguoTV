@@ -82,6 +82,7 @@ class MainActivity : ComponentActivity() {
     private var currentFeed: Feed? = null
     private var feedPrefillJob: Job? = null
     private var feedScrollLoadJob: Job? = null
+    private var defaultFeedWarmupJob: Job? = null
     private var currentSeries: SeriesPage? = null
     private var headerTitle = "推荐"
     private var renderedScreen: Screen? = null
@@ -171,6 +172,7 @@ class MainActivity : ComponentActivity() {
                 snapshotFlow { makeSnapshot() }.distinctUntilChanged().collect { renderSnapshot(it) }
             }
         }
+        scheduleDefaultFeedWarmup()
         if (m.lastSession.player != null) {
             parentScreen = Screen.HOME
             screen = Screen.PLAYER
@@ -547,8 +549,8 @@ class MainActivity : ComponentActivity() {
     }
 
     /**
-     * Fill at least two visible screens in the background. Cards already returned
-     * stay on screen; this job never blocks rendering while it asks for later pages.
+     * Fill the active feed toward 100 cards in the background. Each page is
+     * rendered as soon as it arrives; the UI never waits for the full target.
      */
     private fun scheduleInitialFeedFill(target: Screen, feed: Feed) {
         if (target !in setOf(Screen.HOME, Screen.RANK, Screen.NEW, Screen.SEARCH)) return
@@ -558,9 +560,7 @@ class MainActivity : ComponentActivity() {
         feedScrollLoadJob = null
         recycler.post {
             if (screen != target || currentFeed !== feed || isFinishing) return@post
-            val columns = gridColumns().coerceAtLeast(1)
-            val rowsPerScreen = (recycler.height / dp(330)).coerceAtLeast(2)
-            val targetCards = (columns * rowsPerScreen * 2).coerceAtLeast(columns * 4).coerceAtMost(48)
+            val targetCards = INITIAL_FEED_TARGET_CARDS
             feedPrefillJob = lifecycleScope.launch {
                 var pages = 0
                 var stalledPages = 0
@@ -606,6 +606,45 @@ class MainActivity : ComponentActivity() {
     /** Wait without blocking the UI thread for the current page to finish. */
     private suspend fun awaitFeedIdle(feed: Feed): Boolean =
         withTimeoutOrNull(FEED_PAGE_TIMEOUT_MS) { snapshotFlow { feed.loading }.first { !it } } != null
+
+    /**
+     * Warm only the first page of the two default discovery tabs after Home has
+     * started rendering. Keep these requests staggered, and never prewarm every
+     * rank category, release date, or arbitrary search query.
+     */
+    private fun scheduleDefaultFeedWarmup() {
+        if (defaultFeedWarmupJob?.isActive == true) return
+        defaultFeedWarmupJob = lifecycleScope.launch {
+            delay(DEFAULT_FEED_WARMUP_DELAY_MS)
+            val m = model ?: return@launch
+            warmDefaultFeedFirstPage("rank", m.rankFeed)
+            delay(DEFAULT_FEED_WARMUP_GAP_MS)
+            warmDefaultFeedFirstPage("new", m.newFeed)
+        }
+    }
+
+    /** Prime a feed once; if the viewer already opened it, leave its active loader alone. */
+    private suspend fun warmDefaultFeedFirstPage(label: String, feed: Feed) {
+        if (isFinishing || isDestroyed) return
+        if (feed.loading) {
+            android.util.Log.d("HongguoTVFeed", "warmup $label skipped: first page already in flight")
+            awaitFeedIdle(feed)
+            return
+        }
+        if (feed.started || feed.cards.isNotEmpty() || !feed.wantsMore) {
+            android.util.Log.d("HongguoTVFeed", "warmup $label skipped: feed already started or complete cards=${feed.cards.size}")
+            return
+        }
+        android.util.Log.d("HongguoTVFeed", "warmup $label start")
+        feed.loadMore()
+        if (!awaitFeedIdle(feed)) {
+            android.util.Log.w("HongguoTVFeed", "warmup $label timed out")
+        } else if (feed.error != null) {
+            android.util.Log.w("HongguoTVFeed", "warmup $label failed: ${feed.error}")
+        } else {
+            android.util.Log.d("HongguoTVFeed", "warmup $label finished cards=${feed.cards.size} more=${feed.wantsMore}")
+        }
+    }
 
     private fun cancelFeedPaginationJobs() {
         feedPrefillJob?.cancel()
@@ -1630,6 +1669,9 @@ class MainActivity : ComponentActivity() {
         private const val REQUEST_INSTALL_PERMISSION = 7314
         private const val FEED_PAGE_TIMEOUT_MS = 25_000L
         private const val FEED_INTERPAGE_RENDER_DELAY_MS = 100L
+        private const val INITIAL_FEED_TARGET_CARDS = 100
+        private const val DEFAULT_FEED_WARMUP_DELAY_MS = 1_800L
+        private const val DEFAULT_FEED_WARMUP_GAP_MS = 600L
         private const val MAX_INITIAL_FEED_PAGES = 12
         private const val MAX_SCROLL_FEED_PAGES = 8
         private const val MAX_STALLED_FEED_PAGES = 4
