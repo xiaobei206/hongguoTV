@@ -27,6 +27,10 @@ class TvCardAdapter(
     private val onClick: (Card) -> Unit,
     private val onLongClick: (Card) -> Unit,
 ) : RecyclerView.Adapter<TvCardAdapter.Holder>() {
+    companion object {
+        private const val SKELETON_PREFIX = "__hongguotv_skeleton__"
+    }
+
     private var items: List<Card> = emptyList()
     private val submitScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var submitGeneration = 0
@@ -142,19 +146,28 @@ class TvCardAdapter(
 
     override fun onBindViewHolder(holder: Holder, position: Int) {
         val card = items[position]
+        val skeleton = card.id.startsWith(SKELETON_PREFIX)
         holder.title.text = card.title
-        holder.subtitle.text = card.sub.ifBlank {
+        holder.subtitle.text = if (skeleton) "" else card.sub.ifBlank {
             if (card.episodes > 0) card.episodes.toString() + " 集" else "精彩短剧"
         }
-        holder.rankBadge.visibility = if (card.rank > 0) View.VISIBLE else View.GONE
-        if (card.rank > 0) {
+        holder.title.background = if (skeleton) android.graphics.drawable.InsetDrawable(
+            skeletonBar(), dp(3), dp(10), dp(65), dp(10),
+        ) else null
+        holder.subtitle.background = if (skeleton) android.graphics.drawable.InsetDrawable(
+            skeletonBar(), dp(3), dp(5), dp(110), dp(5),
+        ) else null
+        holder.rankBadge.visibility = if (!skeleton && card.rank > 0) View.VISIBLE else View.GONE
+        if (!skeleton && card.rank > 0) {
             holder.rankBadge.text = "TOP " + card.rank.toString().padStart(2, '0')
             holder.rankBadge.setTextColor(if (card.rank <= 3) 0xff10151c.toInt() else 0xffedf3fb.toInt())
             holder.rankBadge.background = badgeBackground(card.rank <= 3)
         }
-        artwork.load(card.cover, holder.poster)
-        holder.itemView.setOnClickListener { onClick(card) }
-        holder.itemView.setOnLongClickListener { onLongClick(card); true }
+        artwork.load(card.cover, holder.poster, if (skeleton) 0xff2b3949.toInt() else 0xff243449.toInt())
+        holder.itemView.isFocusable = !skeleton
+        holder.itemView.isFocusableInTouchMode = !skeleton
+        holder.itemView.setOnClickListener(if (skeleton) null else View.OnClickListener { onClick(card) })
+        holder.itemView.setOnLongClickListener(if (skeleton) null else View.OnLongClickListener { onLongClick(card); true })
         holder.itemView.onFocusChangeListener = View.OnFocusChangeListener { view, focused ->
             view.background = cardBackground(focused)
             view.scaleX = if (focused) 1.035f else 1f
@@ -162,7 +175,12 @@ class TvCardAdapter(
             view.elevation = if (focused) dp(8).toFloat() else 0f
             holder.title.setTextColor(if (focused) 0xffffd19b.toInt() else 0xfff5f7fb.toInt())
         }
-        holder.itemView.contentDescription = card.title
+        holder.itemView.contentDescription = if (skeleton) "正在加载剧集" else card.title
+    }
+
+    private fun skeletonBar() = GradientDrawable().apply {
+        cornerRadius = dp(5).toFloat()
+        setColor(0xff334154.toInt())
     }
 
     override fun onViewRecycled(holder: Holder) {

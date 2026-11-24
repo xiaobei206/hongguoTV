@@ -21,6 +21,7 @@ import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeout
@@ -51,6 +52,7 @@ class AppModel(
     // The catalog.
     val home = Feed(scope, discover(catalog))
     private val feeds = HashMap<String, Feed>()
+    private var secondaryWarmupStarted = false
     var rankContents by mutableStateOf(emptyList<RankContent>())
         private set
 
@@ -93,7 +95,10 @@ class AppModel(
             home.add(FeedPage(cached, more = true))
             home.stale = true
         }
-        home.onPage = { saveHomeCache(home.cards) }
+        home.onPage = {
+            saveHomeCache(home.cards)
+            warmSecondaryFeedsOnce()
+        }
 
         val s = lastSession
         rankContent = s.rankContent
@@ -102,6 +107,24 @@ class AppModel(
         player.chooseSpeed(s.speed)
         s.quality?.let(player::chooseQuality)
         player.chooseDanmaku(s.danmaku)
+    }
+
+    /**
+     * Warm the default ranking and today's new releases after the first home page
+     * has already reached the viewer. Only one page from each feed is requested;
+     * normal per-screen prefill expands the feed when it is actually opened.
+     */
+    private fun warmSecondaryFeedsOnce() {
+        if (secondaryWarmupStarted) return
+        secondaryWarmupStarted = true
+        scope.launch {
+            delay(700L)
+            val ranking = rankFeed
+            if (!ranking.started || ranking.stale) ranking.loadMore()
+            delay(500L)
+            val newReleases = newFeed
+            if (!newReleases.started || newReleases.stale) newReleases.loadMore()
+        }
     }
 
     /** Writes what is waiting to be saved, as the app leaves the screen. */

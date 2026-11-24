@@ -110,6 +110,9 @@ class MainActivity : ComponentActivity() {
     private lateinit var progressText: TextView
     private lateinit var playerFocusButtons: List<TextView>
     private var episodeDialog: AlertDialog? = null
+    private val loadingSkeletonCards = List(18) { index ->
+        Card(id = "__hongguotv_skeleton__$index", title = "", cover = "", sub = "")
+    }
 
     private val handler = Handler(Looper.getMainLooper())
     private var progressTask: Runnable? = null
@@ -376,7 +379,7 @@ class MainActivity : ComponentActivity() {
                     val manager = rv.layoutManager as? GridLayoutManager ?: return
                     val feed = currentFeed ?: return
                     val lastVisible = manager.findLastVisibleItemPosition()
-                    if (lastVisible >= 0) {
+                    if (feed.cards.isNotEmpty() && lastVisible >= 0) {
                         cardAdapter.preloadRange(lastVisible + 1, manager.spanCount * 3)
                     }
                     if (dy > 0 &&
@@ -453,8 +456,11 @@ class MainActivity : ComponentActivity() {
 
     private fun renderFeed(snapshot: UiSnapshot) {
         renderFeedFilters(snapshot)
-        cardAdapter.submit(snapshot.cards) {
-            recycler.post {
+        val showingSkeletons = snapshot.cards.isEmpty() && snapshot.loading &&
+            screen in setOf(Screen.HOME, Screen.RANK, Screen.NEW, Screen.SEARCH)
+        val visibleCards = if (showingSkeletons) loadingSkeletonCards else snapshot.cards
+        cardAdapter.submit(visibleCards) {
+            if (snapshot.cards.isNotEmpty()) recycler.post {
                 val manager = recycler.layoutManager as? GridLayoutManager ?: return@post
                 val lastVisible = manager.findLastVisibleItemPosition()
                 val start = if (lastVisible >= 0) lastVisible + 1 else 0
@@ -462,7 +468,7 @@ class MainActivity : ComponentActivity() {
             }
         }
         val hasCards = snapshot.cards.isNotEmpty()
-        emptyState.visibility = if (hasCards) View.GONE else View.VISIBLE
+        emptyState.visibility = if (hasCards || showingSkeletons) View.GONE else View.VISIBLE
         emptyState.text = when {
             snapshot.loading -> "正在加载…"
             snapshot.feedError.isNotBlank() -> "${snapshot.feedError}\n按刷新重试"
@@ -473,6 +479,7 @@ class MainActivity : ComponentActivity() {
         header.text = headerTitle
         subHeader.text = when {
             screen == Screen.HISTORY -> "确认：从上次进度继续播放 · 长按可收藏"
+            showingSkeletons -> "正在加载剧集列表 · 海报将独立加载"
             hasCards -> "已加载 ${snapshot.cards.size} 部" +
                 when {
                     snapshot.loading && currentFeed?.wantsMore == true -> " · 正在加载更多…"
