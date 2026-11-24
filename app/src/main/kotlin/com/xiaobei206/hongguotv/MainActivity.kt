@@ -60,8 +60,6 @@ import dev.openhongguo.Episode
 import dev.openhongguo.RankBoard
 import dev.openhongguo.RankContent
 import kotlinx.coroutines.flow.distinctUntilChanged
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withTimeoutOrNull
@@ -76,8 +74,6 @@ class MainActivity : ComponentActivity() {
     private val updateManager by lazy { TvUpdateManager(this) }
     private var checkingForUpdate = false
     private var pendingInstallApk: File? = null
-    private var feedPrefillJob: Job? = null
-    private var feedScrollLoadJob: Job? = null
     private var screen by mutableStateOf(Screen.HOME)
     private var parentScreen = Screen.HOME
     private var searchReturnScreen = Screen.HOME
@@ -110,10 +106,6 @@ class MainActivity : ComponentActivity() {
     private lateinit var progressText: TextView
     private lateinit var playerFocusButtons: List<TextView>
     private var episodeDialog: AlertDialog? = null
-    private val loadingSkeletonCards = List(18) { index ->
-        Card(id = "__hongguotv_skeleton__$index", title = "", cover = "", sub = "")
-    }
-
     private val handler = Handler(Looper.getMainLooper())
     private var progressTask: Runnable? = null
     private val hideControls = Runnable {
@@ -264,7 +256,6 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun navigate(target: Screen) {
-        feedScrollLoadJob?.cancel()
         when (target) {
             Screen.HOME, Screen.RANK, Screen.NEW -> enterFeed(target)
             Screen.FAVORITES, Screen.HISTORY, Screen.DEVICE, Screen.SETTINGS -> {
@@ -280,10 +271,6 @@ class MainActivity : ComponentActivity() {
 
     private fun enterFeed(target: Screen) {
         val m = model ?: return
-        feedPrefillJob?.cancel()
-        feedPrefillJob = null
-        feedScrollLoadJob?.cancel()
-        feedScrollLoadJob = null
         parentScreen = target
         currentSeries = null
         currentFeed = when (target) {
@@ -301,7 +288,6 @@ class MainActivity : ComponentActivity() {
         screen = target
         currentFeed?.let { if (!it.started || it.stale) it.loadMore() }
         showShell()
-        currentFeed?.let { feed -> scheduleInitialFeedPrefill(target, feed) }
     }
 
     private fun showShell() {
@@ -376,17 +362,8 @@ class MainActivity : ComponentActivity() {
             clipChildren = false
             addOnScrollListener(object : RecyclerView.OnScrollListener() {
                 override fun onScrolled(rv: RecyclerView, dx: Int, dy: Int) {
-                    val manager = rv.layoutManager as? GridLayoutManager ?: return
                     val feed = currentFeed ?: return
-                    val lastVisible = manager.findLastVisibleItemPosition()
-                    if (feed.cards.isNotEmpty() && lastVisible >= 0) {
-                        cardAdapter.preloadRange(lastVisible + 1, manager.spanCount * 3)
-                    }
-                    if (dy > 0 &&
-                        lastVisible >= manager.itemCount - gridColumns() * 3 &&
-                        feed.wantsMore) {
-                        loadMoreAtEnd(rv, feed)
-                    }
+                    maybeLoadMoreAtEnd(rv, feed)
                 }
             })
         }
@@ -408,67 +385,16 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    /**
-     * Fetch one upstream page at a time and let RecyclerView render it immediately.
-     * Continue in the background until the list has 100 cards; scrolling still
-     * requests the next page early so browsing never waits for the whole prefill.
-     */
-    private fun scheduleInitialFeedPrefill(target: Screen, feed: Feed) {
-        if (target !in setOf(Screen.HOME, Screen.RANK, Screen.NEW, Screen.SEARCH)) return
-        feedPrefillJob?.cancel()
-        feedScrollLoadJob?.cancel()
-        recycler.post {
-            if (screen != target || currentFeed !== feed) return@post
-            val minimumItems = INITIAL_FEED_PREFETCH_TARGET
-            feedPrefillJob = lifecycleScope.launch {
-                var batches = 0
-                var stalledBatches = 0
-                while (isActive && screen == target && currentFeed === feed &&
-                    feed.cards.size < minimumItems && feed.wantsMore && batches < MAX_INITIAL_FEED_PREFETCH_PAGES) {
-                    val previousCount = feed.cards.size
-                    if (!feed.loading) feed.loadMore()
-                    val completed = withTimeoutOrNull(25_000L) {
-                        snapshotFlow { feed.loading }.first { !it }
-                    } != null
-                    if (!completed) {
-                        android.util.Log.w("HongguoTVFeed", "prefill timed out screen=$target batch=$batches cards=${feed.cards.size}")
-                        break
-                    }
-                    batches++
-                    if (feed.error != null) {
-                        android.util.Log.w("HongguoTVFeed", "prefill stopped on error screen=$target error=${feed.error}")
-                        break
-                    }
-                    if (feed.cards.size <= previousCount) {
-                        stalledBatches++
-                        if (!feed.wantsMore || stalledBatches >= 4) {
-                            android.util.Log.w("HongguoTVFeed", "prefill stalled screen=$target cards=${feed.cards.size} batches=$batches more=${feed.wantsMore}")
-                            break
-                        }
-                    } else stalledBatches = 0
-                }
-                if (screen == target && currentFeed === feed) {
-                    android.util.Log.d("HongguoTVFeed", "prefill finished screen=$target cards=${feed.cards.size} target=$minimumItems batches=$batches more=${feed.wantsMore}")
-                }
-            }
-        }
-    }
-
     private fun renderFeed(snapshot: UiSnapshot) {
         renderFeedFilters(snapshot)
-        val showingSkeletons = snapshot.cards.isEmpty() && snapshot.loading &&
-            screen in setOf(Screen.HOME, Screen.RANK, Screen.NEW, Screen.SEARCH)
-        val visibleCards = if (showingSkeletons) loadingSkeletonCards else snapshot.cards
-        cardAdapter.submit(visibleCards) {
-            if (snapshot.cards.isNotEmpty()) recycler.post {
-                val manager = recycler.layoutManager as? GridLayoutManager ?: return@post
-                val lastVisible = manager.findLastVisibleItemPosition()
-                val start = if (lastVisible >= 0) lastVisible + 1 else 0
-                cardAdapter.preloadRange(start, manager.spanCount * 3)
+        cardAdapter.submit(snapshot.cards) {
+            recycler.post {
+                val feed = currentFeed ?: return@post
+                maybeLoadMoreAtEnd(recycler, feed)
             }
         }
         val hasCards = snapshot.cards.isNotEmpty()
-        emptyState.visibility = if (hasCards || showingSkeletons) View.GONE else View.VISIBLE
+        emptyState.visibility = if (hasCards) View.GONE else View.VISIBLE
         emptyState.text = when {
             snapshot.loading -> "正在加载…"
             snapshot.feedError.isNotBlank() -> "${snapshot.feedError}\n按刷新重试"
@@ -479,7 +405,6 @@ class MainActivity : ComponentActivity() {
         header.text = headerTitle
         subHeader.text = when {
             screen == Screen.HISTORY -> "确认：从上次进度继续播放 · 长按可收藏"
-            showingSkeletons -> "正在加载剧集列表 · 海报将独立加载"
             hasCards -> "已加载 ${snapshot.cards.size} 部" +
                 when {
                     snapshot.loading && currentFeed?.wantsMore == true -> " · 正在加载更多…"
@@ -615,28 +540,16 @@ class MainActivity : ComponentActivity() {
         parent.addView(scroll, LinearLayout.LayoutParams(-1, dp(48)))
     }
 
-    private fun loadMoreAtEnd(rv: RecyclerView, feed: Feed) {
-        if (feedScrollLoadJob?.isActive == true) return
-        feedScrollLoadJob = lifecycleScope.launch {
-            var emptyBatches = 0
-            while (isActive && screen in setOf(Screen.HOME, Screen.RANK, Screen.NEW, Screen.SEARCH) &&
-                currentFeed === feed && recycler === rv && feed.wantsMore) {
-                val manager = rv.layoutManager as? GridLayoutManager ?: break
-                val lastVisible = manager.findLastVisibleItemPosition()
-                if (manager.itemCount > 0 && lastVisible < manager.itemCount - gridColumns() * 3) break
-                val previousCount = feed.cards.size
-                if (!feed.loading) feed.loadMore()
-                val completed = withTimeoutOrNull(25_000L) {
-                    snapshotFlow { feed.loading }.first { !it }
-                } != null
-                if (!completed || feed.error != null) break
-                if (feed.cards.size > previousCount) break
-                emptyBatches++
-                if (emptyBatches >= 4) {
-                    android.util.Log.w("HongguoTVFeed", "scroll pagination paused after $emptyBatches empty batches; cursor still available")
-                    break
-                }
-            }
+    /** Match 开心果 FeedGrid: request one page when 10 items or fewer remain. */
+    private fun maybeLoadMoreAtEnd(rv: RecyclerView, feed: Feed) {
+        if (recycler !== rv || currentFeed !== feed ||
+            screen !in setOf(Screen.HOME, Screen.RANK, Screen.NEW, Screen.SEARCH) ||
+            feed.loading || !feed.wantsMore) return
+        val manager = rv.layoutManager as? GridLayoutManager ?: return
+        val total = manager.itemCount
+        val lastVisible = manager.findLastVisibleItemPosition()
+        if (total > 0 && lastVisible >= 0 && lastVisible >= total - 10) {
+            feed.loadMore()
         }
     }
 
@@ -679,22 +592,16 @@ class MainActivity : ComponentActivity() {
     private fun doSearch(query: String) {
         val m = model ?: return
         if (screen != Screen.SEARCH) searchReturnScreen = screen
-        feedPrefillJob?.cancel()
-        feedScrollLoadJob?.cancel()
         currentFeed = m.searchFeed(query)
         headerTitle = "搜索：$query"
         screen = Screen.SEARCH
         currentFeed?.loadMore()
         showShell()
-        currentFeed?.let { feed -> scheduleInitialFeedPrefill(Screen.SEARCH, feed) }
     }
 
     private fun onCardSelected(card: Card) {
-        feedScrollLoadJob?.cancel()
         if (screen == Screen.HISTORY) {
             val m = model ?: return
-            feedPrefillJob?.cancel()
-            feedPrefillJob = null
             parentScreen = Screen.HISTORY
             m.playSeason(card.id)
             screen = Screen.PLAYER
@@ -706,10 +613,6 @@ class MainActivity : ComponentActivity() {
 
     private fun openDetail(card: Card) {
         val m = model ?: return
-        feedPrefillJob?.cancel()
-        feedPrefillJob = null
-        feedScrollLoadJob?.cancel()
-        feedScrollLoadJob = null
         parentScreen = screen
         currentSeries = m.seriesPage(card.id, restartIfLoading = true)
         screen = Screen.DETAIL
@@ -1450,13 +1353,11 @@ class MainActivity : ComponentActivity() {
                 screen = parentScreen
                 currentSeries = null
                 showShell()
-                currentFeed?.let { feed -> scheduleInitialFeedPrefill(screen, feed) }
             }
             Screen.SEARCH -> {
                 screen = searchReturnScreen
                 currentFeed = feedFor(searchReturnScreen)
                 showShell()
-                currentFeed?.let { feed -> scheduleInitialFeedPrefill(screen, feed) }
             }
             Screen.HOME -> super.onBackPressed()
             else -> enterFeed(Screen.HOME)
@@ -1618,7 +1519,5 @@ class MainActivity : ComponentActivity() {
 
     companion object {
         private const val REQUEST_INSTALL_PERMISSION = 7314
-        private const val INITIAL_FEED_PREFETCH_TARGET = 100
-        private const val MAX_INITIAL_FEED_PREFETCH_PAGES = 20
     }
 }

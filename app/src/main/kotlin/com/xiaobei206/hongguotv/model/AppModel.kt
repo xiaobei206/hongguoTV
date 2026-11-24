@@ -29,7 +29,6 @@ import kotlinx.coroutines.TimeoutCancellationException
 import kotlin.coroutines.cancellation.CancellationException
 import org.json.JSONArray
 import java.io.File
-import java.security.MessageDigest
 
 /**
  * AppModel is the state the app shows. It belongs to the main thread: its
@@ -52,7 +51,6 @@ class AppModel(
     // The catalog.
     val home = Feed(scope, discover(catalog))
     private val feeds = HashMap<String, Feed>()
-    private var secondaryWarmupStarted = false
     var rankContents by mutableStateOf(emptyList<RankContent>())
         private set
 
@@ -95,10 +93,7 @@ class AppModel(
             home.add(FeedPage(cached, more = true))
             home.stale = true
         }
-        home.onPage = {
-            saveHomeCache(home.cards)
-            warmSecondaryFeedsOnce()
-        }
+        home.onPage = { saveHomeCache(home.cards) }
 
         val s = lastSession
         rankContent = s.rankContent
@@ -107,24 +102,6 @@ class AppModel(
         player.chooseSpeed(s.speed)
         s.quality?.let(player::chooseQuality)
         player.chooseDanmaku(s.danmaku)
-    }
-
-    /**
-     * Warm the default ranking and today's new releases after the first home page
-     * has already reached the viewer. Only one page from each feed is requested;
-     * normal per-screen prefill expands the feed when it is actually opened.
-     */
-    private fun warmSecondaryFeedsOnce() {
-        if (secondaryWarmupStarted) return
-        secondaryWarmupStarted = true
-        scope.launch {
-            delay(700L)
-            val ranking = rankFeed
-            if (!ranking.started || ranking.stale) ranking.loadMore()
-            delay(500L)
-            val newReleases = newFeed
-            if (!newReleases.started || newReleases.stale) newReleases.loadMore()
-        }
     }
 
     /** Writes what is waiting to be saved, as the app leaves the screen. */
@@ -228,9 +205,7 @@ class AppModel(
                 }.apply {
                     onPage = { p ->
                         if (p.contents.isNotEmpty()) rankContents = p.contents
-                        saveCatalogCache("rank:$content:$board", cards)
                     }
-                    restoreCatalogCache("rank:$content:$board", this)
                 }
             }
         }
@@ -259,9 +234,7 @@ class AppModel(
                 }.apply {
                     onPage = { p ->
                         if (p.dates.isNotEmpty()) newDates = p.dates
-                        saveCatalogCache("new:${date.ifEmpty { todayKey() }}", cards)
                     }
-                    restoreCatalogCache("new:${date.ifEmpty { todayKey() }}", this)
                 }
             }
         }
@@ -278,44 +251,7 @@ class AppModel(
     fun searchFeed(query: String): Feed {
         val q = query.trim()
         return feed("search:$q") {
-            val result = Feed(scope) { cursor -> search(catalog, q, cursor) }
-            result.order = ::orderSeasons
-
-            // A search page often has IDs and titles before it has poster URLs.
-            // Do not hold the page back for these extra detail requests: show it
-            // first, then enrich missing artwork in a single background queue.
-            val pendingCoverIds = LinkedHashSet<String>()
-            val queuedCoverIds = HashSet<String>()
-            var coverJob: Job? = null
-
-            result.onPage = { page ->
-                saveCatalogCache("search:$q", result.cards)
-                page.cards.forEach { card ->
-                    if (card.cover.isBlank() && queuedCoverIds.add(card.id)) pendingCoverIds.add(card.id)
-                }
-                if (pendingCoverIds.isNotEmpty() && coverJob?.isActive != true) {
-                    coverJob = scope.launch {
-                        while (pendingCoverIds.isNotEmpty()) {
-                            val ids = pendingCoverIds.take(30)
-                            pendingCoverIds.removeAll(ids.toSet())
-                            val details = attempt { catalog.getSeriesBatch(ids) }.getOrNull()
-                            if (details == null) {
-                                debugLog { "search artwork enrichment failed queryLength=${q.length} ids=${ids.size}" }
-                                continue
-                            }
-                            val enriched = details.mapNotNull { it.series?.let(Card::of) }
-                            val updated = result.updateCards(enriched)
-                            if (updated > 0) saveCatalogCache("search:$q", result.cards)
-                            debugLog {
-                                "search artwork enrichment queryLength=${q.length} requested=${ids.size} " +
-                                    "returned=${enriched.size} updated=$updated"
-                            }
-                        }
-                    }
-                }
-            }
-            restoreCatalogCache("search:$q", result)
-            result
+            Feed(scope) { cursor -> search(catalog, q, cursor) }.apply { order = ::orderSeasons }
         }
     }
 
@@ -367,7 +303,7 @@ class AppModel(
     internal fun writeHomeCache(cards: List<Card>) {
         try {
             val a = JSONArray()
-            cards.take(100).forEach { a.put(it.toJson()) }
+            cards.take(48).forEach { a.put(it.toJson()) }
             cacheDir.mkdirs()
             val tmp = File(cacheDir, "home.json.tmp")
             tmp.writeText(a.toString())
@@ -378,51 +314,8 @@ class AppModel(
     }
 
     private fun saveHomeCache(cards: List<Card>) {
-        val snapshot = cards.take(100)
+        val snapshot = cards.take(48)
         scope.launch(Dispatchers.IO) { writeHomeCache(snapshot) }
-    }
-
-    /** Restore a saved first page before starting a slow catalog request. */
-    private fun catalogCacheFile(key: String): File {
-        val hash = MessageDigest.getInstance("SHA-1").digest(key.toByteArray())
-            .joinToString("") { "%02x".format(it) }
-        return File(cacheDir, "feed-$hash.json")
-    }
-
-    private fun restoreCatalogCache(key: String, feed: Feed) {
-        try {
-            val file = catalogCacheFile(key)
-            if (!file.isFile) return
-            val array = JSONArray(file.readText())
-            val cached = (0 until array.length()).mapNotNull { array.optJSONObject(it)?.let(Card::fromJson) }
-            if (cached.isNotEmpty()) {
-                feed.add(FeedPage(cached, more = true))
-                feed.stale = true
-                debugLog { "catalog cache restored key=$key cards=${cached.size}" }
-            }
-        } catch (e: Exception) {
-            debugLog { "catalog cache read failed key=$key error=$e" }
-        }
-    }
-
-    private fun saveCatalogCache(key: String, cards: List<Card>) {
-        val snapshot = cards.take(100)
-        scope.launch(Dispatchers.IO) {
-            try {
-                val array = JSONArray()
-                snapshot.forEach { array.put(it.toJson()) }
-                val target = catalogCacheFile(key)
-                target.parentFile?.mkdirs()
-                val temp = File(target.parentFile, target.name + ".tmp")
-                temp.writeText(array.toString())
-                if (!temp.renameTo(target)) {
-                    temp.copyTo(target, overwrite = true)
-                    temp.delete()
-                }
-            } catch (e: Exception) {
-                debugLog { "catalog cache write failed key=$key error=$e" }
-            }
-        }
     }
 
     // MARK: - Series
@@ -620,28 +513,46 @@ class AppModel(
          * its end.
          */
         internal fun discover(catalog: Catalog): suspend (String) -> FeedPage = { cursor ->
-            // Never hide cursor-advancing empty pages inside one fetch. The feed
-            // scheduler can move past them while rendering each useful page as soon
-            // as its own response arrives.
-            val page = catalog.discover(DiscoverOptions(cursor = cursor))
-            FeedPage(page.items.map(Card::of), page.cursor, page.hasMore)
+            val out = FeedPage(cursor = cursor)
+            for (i in 0 until 3) {
+                val page = catalog.discover(DiscoverOptions(cursor = out.cursor))
+                out.cards = out.cards + page.items.map(Card::of)
+                out.cursor = page.cursor
+                out.more = page.hasMore
+                if (out.cards.isNotEmpty() || !page.hasMore) break
+            }
+            out
         }
 
         internal suspend fun search(catalog: Catalog, q: String, cursor: String): FeedPage {
             val limited = { e: Throwable -> isCode(e, ErrorCode.ANONYMOUS_LIMITED, ErrorCode.END_OF_LIST) }
-            // The 剧集 tab lists each season of a series; 综合 shows its first
-            // season alone, among clips.
+            // The 剧集 tab lists each season of a series; 综合 shows its first season alone, among clips.
             val first = attempt { catalog.search(q, SearchOptions(cursor = cursor, pageSize = 20, tab = "剧集")) }
-            val r: Page<SeriesSummary> = first.getOrElse { e ->
-                if (limited(e)) return FeedPage() // nothing found
+            val page: Page<SeriesSummary> = first.getOrElse { e ->
+                if (limited(e)) return FeedPage()
                 attempt { catalog.search(q, SearchOptions(cursor = cursor, pageSize = 20)) }.getOrElse { e2 ->
                     if (limited(e2)) return FeedPage()
                     throw e2
                 }
             }
-            // Return the result page immediately; missing poster URLs are
-            // enriched asynchronously by searchFeed after this page is visible.
-            return FeedPage(r.items.map(Card::of), r.cursor, r.hasMore)
+            val out = FeedPage(page.items.map(Card::of), page.cursor, page.hasMore && page.items.isNotEmpty())
+            val missing = page.items.filter { it.coverUrl.isEmpty() }.map { it.id }
+            if (missing.isNotEmpty()) {
+                val details = attempt { catalog.getSeriesBatch(missing) }.getOrNull()
+                if (details != null) {
+                    val byId = HashMap<String, Series>()
+                    for (detail in details) detail.series?.let { byId[it.id] = it }
+                    out.cards = out.cards.map { card ->
+                        val series = byId[card.id] ?: return@map card
+                        if (series.episodeCount > 0) {
+                            card.copy(cover = series.coverUrl, sub = episodesLabel(series), episodes = series.episodeCount)
+                        } else {
+                            card.copy(cover = series.coverUrl)
+                        }
+                    }
+                }
+            }
+            return out
         }
     }
 }

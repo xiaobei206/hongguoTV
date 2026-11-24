@@ -72,6 +72,7 @@ class Feed(
             }
         }
         order?.let { list = ArrayList(it(list)) }
+        if (added == 0 && p.cards.isNotEmpty()) more = false
         cards = list
         return added
     }

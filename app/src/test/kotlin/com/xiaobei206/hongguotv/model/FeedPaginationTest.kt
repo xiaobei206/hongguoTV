@@ -39,7 +39,7 @@ class FeedPaginationTest {
     }
 
     @Test
-    fun advancesAcrossDuplicateAndEmptyPagesOneAtATime() {
+    fun stopsWhenPageHasNoNewCardsEvenIfCursorAdvances() {
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
         val requested = mutableListOf<String>()
         val feed = Feed(scope) { cursor ->
@@ -47,9 +47,7 @@ class FeedPaginationTest {
             when (cursor) {
                 "" -> FeedPage(listOf(Card("a", "作品 A")), cursor = "c1", more = true)
                 "c1" -> FeedPage(listOf(Card("a", "作品 A")), cursor = "c2", more = true)
-                "c2" -> FeedPage(emptyList(), cursor = "c3", more = true)
-                "c3" -> FeedPage(listOf(Card("b", "作品 B")), cursor = "c4", more = true)
-                else -> FeedPage(cursor = cursor, more = false)
+                else -> FeedPage(listOf(Card("b", "作品 B")), cursor = "c3", more = true)
             }
         }
 
@@ -57,26 +55,23 @@ class FeedPaginationTest {
             feed.loadMore()
             assertEquals(listOf(""), requested)
             assertEquals(listOf("a"), feed.cards.map { it.id })
+            assertTrue(feed.wantsMore)
 
             feed.loadMore()
             assertEquals(listOf("", "c1"), requested)
             assertEquals(listOf("a"), feed.cards.map { it.id })
+            assertFalse(feed.wantsMore)
 
             feed.loadMore()
-            assertEquals(listOf("", "c1", "c2"), requested)
+            assertEquals(listOf("", "c1"), requested)
             assertEquals(listOf("a"), feed.cards.map { it.id })
-
-            feed.loadMore()
-            assertEquals(listOf("", "c1", "c2", "c3"), requested)
-            assertEquals(listOf("a", "b"), feed.cards.map { it.id })
-            assertTrue(feed.wantsMore)
         } finally {
             scope.cancel()
         }
     }
 
     @Test
-    fun emptyCursorAdvancingPagesCanBeSkippedByThePrefillScheduler() {
+    fun emptyCursorAdvancingPagesCanBeLoadedOneAtATime() {
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
         val requested = mutableListOf<String>()
         val feed = Feed(scope) { cursor ->
