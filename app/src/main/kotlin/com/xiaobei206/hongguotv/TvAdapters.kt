@@ -65,12 +65,14 @@ class TvCardAdapter(
 
     /** Prefetch a bounded range ahead of the current viewport. */
     fun preloadRange(startPosition: Int, count: Int) {
-        if (count <= 0 || items.isEmpty()) return
+        if (count <= 0 || items.isEmpty()) {
+            artwork.preloadRange(emptyList())
+            return
+        }
         val start = startPosition.coerceIn(0, items.size)
         val end = (start + count).coerceAtMost(items.size)
-        for (position in start until end) {
-            artwork.preload(items[position].cover)
-        }
+        val covers = (start until end).map { items[it].cover }
+        artwork.preloadRange(covers)
     }
 
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): Holder {

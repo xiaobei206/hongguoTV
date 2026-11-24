@@ -16,9 +16,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileOutputStream
@@ -27,7 +26,7 @@ import java.net.URI
 import java.net.URL
 import java.nio.ByteBuffer
 import java.security.MessageDigest
-import java.util.LinkedHashSet
+import java.util.LinkedHashMap
 import java.util.WeakHashMap
 import kotlin.math.max
 import kotlin.math.roundToInt
@@ -63,8 +62,10 @@ class TvArtworkLoader(context: Context) {
     private var diskBytesEstimate: Long? = null
     private val inFlight = HashMap<String, Deferred<Bitmap?>>()
     private val previewInFlight = HashMap<String, Deferred<Bitmap?>>()
-    private val preloading = LinkedHashSet<String>()
-    private val preloadMutex = Mutex()
+    /** Only the latest viewport's pending prefetches are retained. */
+    private val prefetchQueue = LinkedHashMap<String, List<String>>()
+    private var prefetchPump: Job? = null
+    private var activePrefetchKey: String? = null
     private val viewJobs = WeakHashMap<ImageView, Job>()
     private val fullDisplayed = WeakHashMap<ImageView, Boolean>()
     private val memory = object : LruCache<String, Bitmap>(96 * 1024) {
@@ -166,46 +167,95 @@ class TvArtworkLoader(context: Context) {
         synchronized(viewJobs) { viewJobs[image] = job }
     }
 
-    /**
-     * Prefetch a nearby card without blocking the UI. The mutex deliberately permits
-     * only one background prefetch at a time, leaving the other full-image lane available
-     * for posters that have become visible while the user scrolls.
-     */
-    fun preload(raw: String) {
-        if (raw.isBlank()) return
-        val candidates = candidateUrls(raw)
-        val first = candidates.firstOrNull() ?: return
-        val k = key(first)
-        if (memory.get(k) != null) return
+    /** Replace pending work with the posters immediately ahead of the current viewport. */
+    fun preload(raw: String) = preloadRange(listOf(raw))
 
-        val cached = file(k)
-        val diskHit = synchronized(diskLock) {
-            if (cached.isFile && cached.length() > 0L && cached.length() <= MAX_FILE_BYTES) {
-                cached.setLastModified(System.currentTimeMillis())
-                true
-            } else {
-                false
+    fun preloadRange(raws: List<String>) {
+        val desired = LinkedHashMap<String, List<String>>()
+        for (raw in raws) {
+            if (raw.isBlank()) continue
+            val candidates = candidateUrls(raw)
+            val first = candidates.firstOrNull() ?: continue
+            val k = key(first)
+            if (desired.containsKey(k) || memory.get(k) != null) continue
+
+            val cached = file(k)
+            val diskHit = synchronized(diskLock) {
+                if (cached.isFile && cached.length() > 0L && cached.length() <= MAX_FILE_BYTES) {
+                    cached.setLastModified(System.currentTimeMillis())
+                    true
+                } else {
+                    false
+                }
             }
+            if (!diskHit) desired[k] = candidates
+            if (desired.size >= MAX_PREFETCH_IN_FLIGHT) break
         }
-        if (diskHit) return
 
         synchronized(requestLock) {
-            if (preloading.contains(k) || inFlight[k]?.isActive == true) return
-            if (preloading.size >= MAX_PREFETCH_IN_FLIGHT) return
-            preloading.add(k)
+            // Discard stale queued URLs on every scroll update. One already-started
+            // background request may finish, but old rows cannot fill the queue.
+            prefetchQueue.clear()
+            for ((k, candidates) in desired) {
+                if (k == activePrefetchKey || inFlight[k]?.isActive == true) continue
+                prefetchQueue[k] = candidates
+                if (prefetchQueue.size >= MAX_PREFETCH_IN_FLIGHT) break
+            }
+            if (prefetchQueue.isNotEmpty() && prefetchPump?.isActive != true) {
+                val pump = scope.launch(start = CoroutineStart.LAZY) { drainPrefetchQueue() }
+                prefetchPump = pump
+                pump.start()
+            }
         }
+    }
 
-        scope.launch {
-            try {
-                preloadMutex.withLock {
-                    requestFull(k, candidates).await()
+    private suspend fun drainPrefetchQueue() {
+        val thisJob = currentCoroutineContext()[Job]
+        try {
+            while (true) {
+                val next = synchronized(requestLock) {
+                    val entry = prefetchQueue.entries.firstOrNull()
+                    if (entry == null) {
+                        if (prefetchPump === thisJob) prefetchPump = null
+                        null
+                    } else {
+                        prefetchQueue.remove(entry.key)
+                        activePrefetchKey = entry.key
+                        entry.key to entry.value
+                    }
+                } ?: return
+
+                val (k, candidates) = next
+                try {
+                    if (memory.get(k) == null) {
+                        val cached = file(k)
+                        val diskHit = synchronized(diskLock) {
+                            if (cached.isFile && cached.length() > 0L && cached.length() <= MAX_FILE_BYTES) {
+                                cached.setLastModified(System.currentTimeMillis())
+                                true
+                            } else false
+                        }
+                        if (!diskHit) requestFull(k, candidates).await()
+                    }
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (e: Exception) {
+                    Log.d(TAG, "poster prefetch failed key=${k} type=${e.javaClass.simpleName}")
+                } finally {
+                    synchronized(requestLock) {
+                        if (activePrefetchKey == k) activePrefetchKey = null
+                    }
                 }
-            } catch (cancelled: CancellationException) {
-                throw cancelled
-            } catch (e: Exception) {
-                Log.d(TAG, "poster prefetch failed key=${k} type=${e.javaClass.simpleName}")
-            } finally {
-                synchronized(requestLock) { preloading.remove(k) }
+            }
+        } finally {
+            synchronized(requestLock) {
+                if (prefetchPump === thisJob) prefetchPump = null
+                // Recover if cancellation happened after a new viewport queued work.
+                if (prefetchPump == null && prefetchQueue.isNotEmpty()) {
+                    val pump = scope.launch(start = CoroutineStart.LAZY) { drainPrefetchQueue() }
+                    prefetchPump = pump
+                    pump.start()
+                }
             }
         }
     }
