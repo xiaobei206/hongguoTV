@@ -29,11 +29,11 @@ jobs:
           ref: 1e9334185a46033bcc4e3e30fc41f649958b1389
           path: .build/openhongguo
 
-      - name: Checkout audited Android diagnostics patch
+      - name: Checkout pinned Android diagnostics patch
         uses: actions/checkout@v4
         with:
           repository: xiaobei206/kaixinguo-android
-          ref: main
+          ref: 7acbf7c5f12723431702c1005bcd110470ee3976
           path: .build/kaixinguo
 
       - name: Set up Go 1.26
