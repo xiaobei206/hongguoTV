@@ -33,7 +33,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: xiaobei206/kaixinguo-android
-          ref: 7acbf7c5f12723431702c1005bcd110470ee3976
+          ref: dc8c63b492228e5a7ab83c53fed4e1521a3cc76d
           path: .build/kaixinguo
 
       - name: Set up Go 1.26
