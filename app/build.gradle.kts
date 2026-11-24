@@ -99,7 +99,7 @@ dependencies {
     implementation("androidx.media3:media3-exoplayer:1.8.1")
     implementation("androidx.media3:media3-ui:1.8.1")
     implementation("androidx.media3:media3-session:1.8.1")
-    if (patchedOpenhongguoAar != null) {
+    if (patchedOpenhongguoAarFile != null) {
         implementation(files(patchedOpenhongguoAarFile))
     } else {
         implementation("io.github.beilunyang:openhongguo:0.4.0")
