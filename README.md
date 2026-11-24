@@ -28,7 +28,7 @@ TV 端与「开心果」手机/平板端独立发布，复用 openhongguo Kotlin
 正式 CI 使用固定版本的 Go SDK 源码构建 Android AAR，而不是直接使用 Maven 上的旧 SDK 包：
 
 - openhongguo：`1e9334185a46033bcc4e3e30fc41f649958b1389`
-- 开心果共享 SDK 补丁：`7acbf7c5f12723431702c1005bcd110470ee3976`
+- 开心果共享 SDK 补丁：`dc8c63b492228e5a7ab83c53fed4e1521a3cc76d`
 - 工具链：Go 1.26、JDK 17、Android SDK 36、NDK 28.2.13676358，以及固定版本的 gomobile（见 Android CI 工作流）。
 
 本地构建还需要 Python 3、Git，并先按 CI 的固定版本生成 AAR。以下命令在已配置好 Android SDK / NDK 的 Bash 环境中执行：
@@ -37,7 +37,7 @@ TV 端与「开心果」手机/平板端独立发布，复用 openhongguo Kotlin
     git clone https://github.com/xiaobei206/openhongguo .build/openhongguo
     git -C .build/openhongguo checkout 1e9334185a46033bcc4e3e30fc41f649958b1389
     git clone https://github.com/xiaobei206/kaixinguo-android .build/kaixinguo
-    git -C .build/kaixinguo checkout 7acbf7c5f12723431702c1005bcd110470ee3976
+    git -C .build/kaixinguo checkout dc8c63b492228e5a7ab83c53fed4e1521a3cc76d
     python3 .build/kaixinguo/scripts/patch-openhongguo.py .build/openhongguo
     cd .build/openhongguo
     go test ./...
