@@ -50,7 +50,6 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
@@ -61,8 +60,6 @@ import androidx.compose.ui.Alignment
 import com.xiaobei206.hongguotv.TvArtworkLoader
 import com.xiaobei206.hongguotv.model.Card
 import com.xiaobei206.hongguotv.model.Feed
-import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.math.max
 
 internal data class TvFeedFilterChoice(
@@ -115,75 +112,23 @@ internal fun TvFeedScreen(
             .padding(start = 22.dp, end = 24.dp, top = 14.dp, bottom = 14.dp),
     ) {
         val columns = (maxWidth / 190.dp).toInt().coerceIn(3, 7)
-        val estimatedVisibleRows = (maxHeight / 295.dp).toInt().coerceAtLeast(2)
-        val initialTarget = (columns * estimatedVisibleRows * 2).coerceIn(20, 40)
 
-        var paginationEpoch by remember(feed, state.feedKey) { mutableIntStateOf(0) }
-        var sparseBatchesPaused by remember(feed, state.feedKey) { mutableStateOf(false) }
-
-        // One coroutine coordinates first-screen fill and scrolling. This avoids
-        // competing prefetch loops and caps consecutive empty batches while still
-        // walking cursor-advancing pages far enough to find sparse valid results.
-        LaunchedEffect(feed, state.feedKey, gridState, columns, paginationEpoch, state.error) {
+        // Match 开心果 FeedGrid: enter with one page, then request the next
+        // page when the last visible item reaches the final ten grid entries.
+        LaunchedEffect(feed, state.feedKey, gridState) {
             val source = feed ?: return@LaunchedEffect
-            var rounds = 0
-            var emptyBatches = 0
-            while (rounds < 8 && source.cards.size < initialTarget && source.wantsMore) {
-                if (source.loading) {
-                    val completed = withTimeoutOrNull(30_000L) {
-                        snapshotFlow { source.loading }.first { !it }
-                    } != null
-                    if (!completed) {
-                        sparseBatchesPaused = true
-                        break
-                    }
-                }
-                if (source.error != null || source.cards.size >= initialTarget || !source.wantsMore) break
-                val before = source.cards.size
-                source.loadMore(minAdditionalCards = (initialTarget - before).coerceAtLeast(1))
-                val completed = withTimeoutOrNull(30_000L) {
-                    snapshotFlow { source.loading }.first { !it }
-                } != null
-                if (!completed || source.error != null) break
-                rounds++
-                if (source.cards.size <= before) {
-                    emptyBatches++
-                    if (emptyBatches >= 4) {
-                        sparseBatchesPaused = true
-                        break
-                    }
-                } else {
-                    emptyBatches = 0
-                    sparseBatchesPaused = false
-                }
-            }
-            if (sparseBatchesPaused) return@LaunchedEffect
-
-            while (source.wantsMore) {
-                val threshold = (columns * 3).coerceAtLeast(9)
-                snapshotFlow {
-                    val info = gridState.layoutInfo
-                    val count = info.totalItemsCount
-                    val lastVisible = info.visibleItemsInfo.lastOrNull()?.index ?: -1
-                    !source.loading && source.wantsMore &&
-                        (source.cards.isEmpty() || (count > 0 && lastVisible >= count - threshold))
-                }.first { it }
-                if (source.error != null) break
-                val before = source.cards.size
-                source.loadMore()
-                val completed = withTimeoutOrNull(30_000L) {
-                    snapshotFlow { source.loading }.first { !it }
-                } != null
-                if (!completed || source.error != null) break
-                if (source.cards.size <= before) {
-                    emptyBatches++
-                    if (emptyBatches >= 4) {
-                        sparseBatchesPaused = true
-                        break
-                    }
-                } else {
-                    emptyBatches = 0
-                    sparseBatchesPaused = false
+            if (!source.started) source.loadMore()
+            snapshotFlow {
+                val info = gridState.layoutInfo
+                Triple(
+                    info.visibleItemsInfo.lastOrNull()?.index ?: -1,
+                    info.totalItemsCount,
+                    source.loading,
+                )
+            }.collect { (lastVisible, total, loading) ->
+                if (!loading && source.cards.isNotEmpty() && source.wantsMore &&
+                    total > 0 && lastVisible >= total - 10) {
+                    source.loadMore()
                 }
             }
         }
@@ -235,11 +180,7 @@ internal fun TvFeedScreen(
                     )
                 }
                 TvActionButton(label = "搜剧", onClick = onSearch, width = 88.dp)
-                TvActionButton(label = "刷新", onClick = {
-                    sparseBatchesPaused = false
-                    paginationEpoch++
-                    onRefresh()
-                }, width = 88.dp)
+                TvActionButton(label = "刷新", onClick = onRefresh, width = 88.dp)
             }
 
             if (state.filterRows.isNotEmpty()) {
@@ -290,18 +231,7 @@ internal fun TvFeedScreen(
                         )
                         if (!state.loading && state.error.isNotBlank()) {
                             Spacer(Modifier.height(12.dp))
-                            TvActionButton(label = "重试加载", onClick = {
-                                sparseBatchesPaused = false
-                                paginationEpoch++
-                                onRefresh()
-                            }, width = 140.dp)
-                        } else if (!state.loading && sparseBatchesPaused && feed?.wantsMore == true) {
-                            Spacer(Modifier.height(12.dp))
-                            TvActionButton(label = "继续查找", onClick = {
-                                sparseBatchesPaused = false
-                                paginationEpoch++
-                                feed.loadMore(minAdditionalCards = initialTarget)
-                            }, width = 140.dp)
+                            TvActionButton(label = "重试加载", onClick = onRefresh, width = 140.dp)
                         }
                     }
                 }
@@ -338,7 +268,6 @@ internal fun TvFeedScreen(
                                     text = when {
                                         state.error.isNotBlank() -> "本批加载失败，可按右上角刷新重试"
                                         state.loading -> "正在补载更多剧集…"
-                                        sparseBatchesPaused -> "连续多批没有新剧，按刷新继续查找"
                                         else -> "继续向下浏览，将自动加载后续内容"
                                     },
                                     color = TvColors.muted,
