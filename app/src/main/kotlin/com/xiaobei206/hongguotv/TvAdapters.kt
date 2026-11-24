@@ -42,6 +42,16 @@ class TvCardAdapter(
 
     override fun getItemCount() = items.size
 
+    /** Prefetch a bounded range ahead of the current viewport. */
+    fun preloadRange(startPosition: Int, count: Int) {
+        if (count <= 0 || items.isEmpty()) return
+        val start = startPosition.coerceIn(0, items.size)
+        val end = (start + count).coerceAtMost(items.size)
+        for (position in start until end) {
+            artwork.preload(items[position].cover)
+        }
+    }
+
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): Holder {
         val root = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL

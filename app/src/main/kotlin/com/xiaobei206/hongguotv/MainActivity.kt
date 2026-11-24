@@ -375,8 +375,12 @@ class MainActivity : ComponentActivity() {
                 override fun onScrolled(rv: RecyclerView, dx: Int, dy: Int) {
                     val manager = rv.layoutManager as? GridLayoutManager ?: return
                     val feed = currentFeed ?: return
+                    val lastVisible = manager.findLastVisibleItemPosition()
+                    if (lastVisible >= 0) {
+                        cardAdapter.preloadRange(lastVisible + 1, manager.spanCount * 3)
+                    }
                     if (dy > 0 &&
-                        manager.findLastVisibleItemPosition() >= manager.itemCount - gridColumns() * 3 &&
+                        lastVisible >= manager.itemCount - gridColumns() * 3 &&
                         feed.wantsMore) {
                         loadMoreAtEnd(rv, feed)
                     }
@@ -450,6 +454,12 @@ class MainActivity : ComponentActivity() {
     private fun renderFeed(snapshot: UiSnapshot) {
         renderFeedFilters(snapshot)
         cardAdapter.submit(snapshot.cards)
+        recycler.post {
+            val manager = recycler.layoutManager as? GridLayoutManager ?: return@post
+            val lastVisible = manager.findLastVisibleItemPosition()
+            val start = if (lastVisible >= 0) lastVisible + 1 else 0
+            cardAdapter.preloadRange(start, manager.spanCount * 3)
+        }
         val hasCards = snapshot.cards.isNotEmpty()
         emptyState.visibility = if (hasCards) View.GONE else View.VISIBLE
         emptyState.text = when {

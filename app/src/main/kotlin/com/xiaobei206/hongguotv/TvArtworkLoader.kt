@@ -4,22 +4,21 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.ImageDecoder
-import android.net.Uri
 import android.os.Build
 import android.util.Log
 import android.util.LruCache
 import android.widget.ImageView
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
-import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileOutputStream
@@ -28,46 +27,63 @@ import java.net.URI
 import java.net.URL
 import java.nio.ByteBuffer
 import java.security.MessageDigest
+import java.util.LinkedHashSet
 import java.util.WeakHashMap
 import kotlin.math.max
 import kotlin.math.roundToInt
 
 /**
- * Bounded artwork loader for older Android TV devices.
+ * TV poster pipeline with bounded memory/disk caches and separate preview/full-image lanes.
  *
- * - Two concurrent image/network jobs, separated from catalog and playback work.
- * - Shared in-flight requests prevent the same poster being downloaded for every rebind.
- * - Recycled views cancel their waiter and cannot receive stale images.
- * - HTTP CDN URLs are upgraded to HTTPS first; legacy TV-friendly JPEG renditions are tried
- *   for the ByteDance novel-image CDN, with the original URL retained as a compatibility fallback.
- * - Small decoded bitmaps, bounded memory/disk caches, and detailed but URL-token-safe logs.
+ * - 96 MiB bitmap LRU and 256 MiB disk LRU.
+ * - Four low-priority preview workers plus two full-image workers (six total).
+ * - Same-URL downloads are shared; recycled ImageViews cannot receive stale results.
+ * - Nearby cards are prefetched, but only one background prefetch may occupy a full-image lane.
+ * - ByteDance novel posters show a small preview first, then replace it with the full image.
  */
 class TvArtworkLoader(context: Context) {
     companion object {
         private const val TAG = "HongguoTVArtwork"
         private const val MAX_FILE_BYTES = 4L * 1024 * 1024
-        private const val MAX_DISK_BYTES = 64L * 1024 * 1024
-        private const val MAX_EDGE = 420
+        private const val MAX_DISK_BYTES = 256L * 1024 * 1024
+        private const val MAX_EDGE = 600
+        private const val PREVIEW_EDGE = 120
+        private const val MAX_PREFETCH_IN_FLIGHT = 18
     }
 
     private val appContext = context.applicationContext
     private val dir = File(appContext.cacheDir, "tv-covers").apply { mkdirs() }
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO.limitedParallelism(4))
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private val previewDispatcher = Dispatchers.IO.limitedParallelism(4)
+    private val imageDispatcher = Dispatchers.IO.limitedParallelism(2)
     private val requestLock = Any()
+    private val diskLock = Any()
     private val inFlight = HashMap<String, Deferred<Bitmap?>>()
+    private val previewInFlight = HashMap<String, Deferred<Bitmap?>>()
+    private val preloading = LinkedHashSet<String>()
+    private val preloadMutex = Mutex()
     private val viewJobs = WeakHashMap<ImageView, Job>()
-    private val memory = object : LruCache<String, Bitmap>(12 * 1024) {
+    private val fullDisplayed = WeakHashMap<ImageView, Boolean>()
+    private val memory = object : LruCache<String, Bitmap>(96 * 1024) {
         override fun sizeOf(key: String, value: Bitmap) =
             (value.allocationByteCount / 1024).coerceAtLeast(1)
     }
 
+    /** Return the cached full-size JPEG, if it exists, for the phone handoff path. */
     fun cachedJpeg(raw: String): ByteArray? {
         if (raw.isBlank()) return null
-        val k = key(candidateUrls(raw).first())
-        val f = file(k)
-        return if (f.isFile && f.length() <= MAX_FILE_BYTES) {
-            runCatching { f.readBytes() }.getOrNull()
-        } else null
+        val first = candidateUrls(raw).firstOrNull() ?: return null
+        val cached = file(key(first))
+        return synchronized(diskLock) {
+            if (cached.isFile && cached.length() > 0L && cached.length() <= MAX_FILE_BYTES) {
+                runCatching { cached.readBytes() }.getOrNull()?.also {
+                    cached.setLastModified(System.currentTimeMillis())
+                }
+            } else {
+                if (cached.isFile && cached.length() > MAX_FILE_BYTES) cached.delete()
+                null
+            }
+        }
     }
 
     fun load(raw: String, image: ImageView, placeholder: Int = 0xff243449.toInt()) {
@@ -79,116 +95,270 @@ class TvArtworkLoader(context: Context) {
         }
 
         val candidates = candidateUrls(raw)
-        val k = key(candidates.first())
+        val first = candidates.firstOrNull()
+        if (first == null) {
+            cancel(image)
+            image.setImageDrawable(null)
+            image.setBackgroundColor(placeholder)
+            return
+        }
+        val k = key(first)
         val sameRequestRunning = synchronized(viewJobs) {
             image.tag == k && viewJobs[image]?.isActive == true
         }
         if (sameRequestRunning) return
+
         cancel(image)
         image.tag = k
         image.setImageDrawable(null)
         image.setBackgroundColor(placeholder)
         memory.get(k)?.let {
-            image.setImageBitmap(it)
+            synchronized(viewJobs) {
+                if (image.tag == k) {
+                    fullDisplayed[image] = true
+                    image.setImageBitmap(it)
+                }
+            }
             return
         }
 
         val job = scope.launch {
-            val request = synchronized(requestLock) {
-                inFlight[k]?.takeUnless { it.isCancelled } ?: scope.async(start = CoroutineStart.LAZY) {
-                    getBitmap(k, candidates)
-                }.also {
-                    inFlight[k] = it
-                    it.start()
+            // Start the full request immediately so a slow preview never delays the final image.
+            val fullRequest = requestFull(k, candidates)
+            val hasFullDiskFile = synchronized(diskLock) {
+                file(k).let { it.isFile && it.length() > 0L && it.length() <= MAX_FILE_BYTES }
+            }
+            val previewRequest = if (!hasFullDiskFile) {
+                previewUrl(first)?.let { requestPreview(k, it) }
+            } else null
+
+            if (previewRequest != null) {
+                scope.launch {
+                    val preview = try {
+                        previewRequest.await()
+                    } catch (cancelled: CancellationException) {
+                        return@launch
+                    } catch (e: Exception) {
+                        Log.d(TAG, "preview unavailable key=${k} type=${e.javaClass.simpleName}")
+                        null
+                    }
+                    if (preview != null) displayIfCurrent(image, k, preview, full = false)
                 }
             }
+
             val bitmap = try {
-                request.await()
+                fullRequest.await()
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (e: Exception) {
-                Log.w(TAG, "poster request failed key=$k type=${e.javaClass.simpleName}", e)
+                Log.w(TAG, "poster request failed key=${k} type=${e.javaClass.simpleName}", e)
                 null
-            } finally {
-                synchronized(requestLock) {
-                    if (inFlight[k] === request && request.isCompleted) inFlight.remove(k)
-                }
             }
-            withContext(Dispatchers.Main) {
-                if (image.tag == k) {
-                    if (bitmap != null) image.setImageBitmap(bitmap)
-                    else Log.w(TAG, "poster unavailable key=$k candidates=${candidates.size}")
-                }
+            if (bitmap != null) {
+                displayIfCurrent(image, k, bitmap, full = true)
+            } else {
+                Log.w(TAG, "poster unavailable key=${k} candidates=${candidates.size}")
             }
         }
         synchronized(viewJobs) { viewJobs[image] = job }
     }
 
-    /** Call when RecyclerView releases a holder. */
+    /**
+     * Prefetch a nearby card without blocking the UI. The mutex deliberately permits
+     * only one background prefetch at a time, leaving the other full-image lane available
+     * for posters that have become visible while the user scrolls.
+     */
+    fun preload(raw: String) {
+        if (raw.isBlank()) return
+        val candidates = candidateUrls(raw)
+        val first = candidates.firstOrNull() ?: return
+        val k = key(first)
+        if (memory.get(k) != null) return
+
+        val cached = file(k)
+        val diskHit = synchronized(diskLock) {
+            if (cached.isFile && cached.length() > 0L && cached.length() <= MAX_FILE_BYTES) {
+                cached.setLastModified(System.currentTimeMillis())
+                true
+            } else {
+                false
+            }
+        }
+        if (diskHit) return
+
+        synchronized(requestLock) {
+            if (preloading.contains(k) || inFlight[k]?.isActive == true) return
+            if (preloading.size >= MAX_PREFETCH_IN_FLIGHT) return
+            preloading.add(k)
+        }
+
+        scope.launch {
+            try {
+                preloadMutex.withLock {
+                    requestFull(k, candidates).await()
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (e: Exception) {
+                Log.d(TAG, "poster prefetch failed key=${k} type=${e.javaClass.simpleName}")
+            } finally {
+                synchronized(requestLock) { preloading.remove(k) }
+            }
+        }
+    }
+
+    /** Call when RecyclerView releases a holder. Shared downloads keep running for other waiters. */
     fun cancel(image: ImageView) {
-        val old = synchronized(viewJobs) { viewJobs.remove(image) }
+        val old = synchronized(viewJobs) {
+            fullDisplayed.remove(image)
+            viewJobs.remove(image)
+        }
         old?.cancel()
         image.tag = null
     }
+
+    private fun displayIfCurrent(image: ImageView, k: String, bitmap: Bitmap, full: Boolean) {
+        synchronized(viewJobs) {
+            if (image.tag != k) return
+            if (!full && fullDisplayed[image] == true) return
+            if (full) fullDisplayed[image] = true
+            image.setImageBitmap(bitmap)
+        }
+    }
+
+    private fun requestFull(k: String, candidates: List<String>): Deferred<Bitmap?> =
+        synchronized(requestLock) {
+            val active = inFlight[k]
+            if (active?.isActive == true) {
+                active
+            } else {
+                val request = scope.async(imageDispatcher, start = CoroutineStart.LAZY) {
+                    getBitmap(k, candidates)
+                }
+                inFlight[k] = request
+                request.invokeOnCompletion {
+                    synchronized(requestLock) {
+                        if (inFlight[k] === request) inFlight.remove(k)
+                    }
+                }
+                request.start()
+                request
+            }
+        }
+
+    private fun requestPreview(k: String, url: String): Deferred<Bitmap?> =
+        synchronized(requestLock) {
+            val active = previewInFlight[k]
+            if (active?.isActive == true) {
+                active
+            } else {
+                val request = scope.async(previewDispatcher, start = CoroutineStart.LAZY) {
+                    getPreviewBitmap(k, url)
+                }
+                previewInFlight[k] = request
+                request.invokeOnCompletion {
+                    synchronized(requestLock) {
+                        if (previewInFlight[k] === request) previewInFlight.remove(k)
+                    }
+                }
+                request.start()
+                request
+            }
+        }
 
     private fun getBitmap(k: String, candidates: List<String>): Bitmap? {
         memory.get(k)?.let { return it }
         val cached = file(k)
         if (cached.isFile) {
-            runCatching { cached.readBytes() }.getOrNull()?.let { bytes ->
+            val bytes = synchronized(diskLock) {
+                if (cached.length() > 0L && cached.length() <= MAX_FILE_BYTES) {
+                    runCatching { cached.readBytes() }.getOrNull()
+                } else null
+            }
+            if (bytes != null) {
                 decode(bytes, "disk")?.let {
+                    touch(cached)
                     memory.put(k, it)
                     return it
                 }
             }
-            cached.delete()
+            synchronized(diskLock) { cached.delete() }
         }
 
         for (candidate in candidates) {
             val bytes = download(candidate) ?: continue
-            val bitmap = decode(bytes, URL(candidate).host) ?: continue
+            val bitmap = decode(bytes, runCatching { URL(candidate).host }.getOrDefault("unknown")) ?: continue
             memory.put(k, bitmap)
-            save(bitmap, cached)
+            save(bitmap, cached, 84)
             trim()
             return bitmap
         }
         return null
     }
 
+    private fun getPreviewBitmap(k: String, url: String): Bitmap? {
+        val memoryKey = previewMemoryKey(k)
+        memory.get(memoryKey)?.let { return it }
+        val cached = previewFile(k)
+        if (cached.isFile) {
+            val bytes = synchronized(diskLock) {
+                if (cached.length() > 0L && cached.length() <= MAX_FILE_BYTES) {
+                    runCatching { cached.readBytes() }.getOrNull()
+                } else null
+            }
+            if (bytes != null) {
+                decode(bytes, "preview-disk", PREVIEW_EDGE)?.let {
+                    touch(cached)
+                    memory.put(memoryKey, it)
+                    return it
+                }
+            }
+            synchronized(diskLock) { cached.delete() }
+        }
+
+        val bytes = download(url) ?: return null
+        val bitmap = decode(bytes, "preview", PREVIEW_EDGE) ?: return null
+        memory.put(memoryKey, bitmap)
+        save(bitmap, cached, 76)
+        trim()
+        return bitmap
+    }
+
     @Suppress("NewApi")
-    private fun decode(bytes: ByteArray, source: String): Bitmap? {
+    private fun decode(bytes: ByteArray, source: String, targetEdge: Int = MAX_EDGE): Bitmap? {
         return try {
             val bitmap = if (Build.VERSION.SDK_INT >= 28) {
                 ImageDecoder.decodeBitmap(ImageDecoder.createSource(ByteBuffer.wrap(bytes))) { decoder, info, _ ->
-                    val scale = minOf(1.0, MAX_EDGE.toDouble() / max(info.size.width, info.size.height))
+                    val scale = minOf(1.0, targetEdge.toDouble() / max(info.size.width, info.size.height))
                     decoder.setTargetSize(
                         (info.size.width * scale).roundToInt().coerceAtLeast(1),
                         (info.size.height * scale).roundToInt().coerceAtLeast(1),
                     )
                     decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
+                    decoder.setMemorySizePolicy(ImageDecoder.MEMORY_POLICY_LOW_RAM)
                 }
             } else {
                 val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
                 BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
                 if (bounds.outWidth <= 0 || bounds.outHeight <= 0) {
-                    Log.w(TAG, "unsupported image source=$source bytes=${bytes.size}")
+                    Log.w(TAG, "unsupported image source=${source} bytes=${bytes.size}")
                     return null
                 }
                 var sample = 1
-                while (max(bounds.outWidth, bounds.outHeight) / sample > MAX_EDGE) sample *= 2
+                while (max(bounds.outWidth, bounds.outHeight) / sample > targetEdge) sample *= 2
                 BitmapFactory.decodeByteArray(bytes, 0, bytes.size, BitmapFactory.Options().apply {
                     inSampleSize = sample
                     inPreferredConfig = Bitmap.Config.RGB_565
                 })
             }
-            if (bitmap == null) Log.w(TAG, "decoder returned null source=$source bytes=${bytes.size}")
+            if (bitmap == null) Log.w(TAG, "decoder returned null source=${source} bytes=${bytes.size}")
             bitmap
         } catch (e: OutOfMemoryError) {
-            Log.w(TAG, "poster decode ran out of memory source=$source bytes=${bytes.size}")
+            Log.w(TAG, "poster decode ran out of memory source=${source} bytes=${bytes.size}")
             memory.evictAll()
             null
         } catch (e: Exception) {
-            Log.w(TAG, "poster decode failed source=$source bytes=${bytes.size} type=${e.javaClass.simpleName}")
+            Log.w(TAG, "poster decode failed source=${source} bytes=${bytes.size} type=${e.javaClass.simpleName}")
             null
         }
     }
@@ -207,7 +377,7 @@ class TvArtworkLoader(context: Context) {
             val code = connection.responseCode
             val type = connection.contentType.orEmpty()
             if (code !in 200..299) {
-                Log.w(TAG, "poster HTTP=$code host=${connection.url.host} type=$type")
+                Log.w(TAG, "poster HTTP=${code} host=${connection.url.host} type=${type}")
                 return null
             }
             if (connection.contentLength.toLong() > MAX_FILE_BYTES) {
@@ -229,7 +399,7 @@ class TvArtworkLoader(context: Context) {
                     out.write(buffer, 0, n)
                 }
                 if (!type.startsWith("image/", true) && type.isNotBlank()) {
-                    Log.i(TAG, "poster content-type=$type host=${connection.url.host}; trying decoder")
+                    Log.i(TAG, "poster content-type=${type} host=${connection.url.host}; trying decoder")
                 }
                 out.toByteArray()
             }
@@ -241,32 +411,60 @@ class TvArtworkLoader(context: Context) {
         }
     }
 
-    private fun save(bitmap: Bitmap, target: File) {
+    private fun save(bitmap: Bitmap, target: File, quality: Int) {
         val temp = File(target.parentFile, target.name + ".tmp")
         runCatching {
-            FileOutputStream(temp).use { bitmap.compress(Bitmap.CompressFormat.JPEG, 82, it) }
-            if (!temp.renameTo(target)) {
-                temp.delete()
-                Log.w(TAG, "poster cache replace failed")
+            synchronized(diskLock) {
+                FileOutputStream(temp).use { bitmap.compress(Bitmap.CompressFormat.JPEG, quality, it) }
+                if (!temp.renameTo(target)) {
+                    target.delete()
+                    if (!temp.renameTo(target)) {
+                        temp.delete()
+                        Log.w(TAG, "poster cache replace failed")
+                    }
+                }
             }
         }.onFailure {
-            temp.delete()
+            synchronized(diskLock) { temp.delete() }
             Log.w(TAG, "poster cache write failed", it)
         }
     }
 
+    private fun touch(target: File) {
+        synchronized(diskLock) {
+            if (target.isFile) target.setLastModified(System.currentTimeMillis())
+        }
+    }
+
     private fun trim() {
-        val files = dir.listFiles()?.filter { it.isFile && !it.name.endsWith(".tmp") }
-            ?.sortedBy { it.lastModified() } ?: return
-        var total = files.sumOf { it.length() }
-        for (item in files) {
-            if (total <= MAX_DISK_BYTES) break
-            total -= item.length()
-            item.delete()
+        synchronized(diskLock) {
+            val all = dir.listFiles()?.filter { it.isFile } ?: return
+            all.filter { it.name.endsWith(".tmp") }.forEach { it.delete() }
+            val files = all.filterNot { it.name.endsWith(".tmp") }.sortedBy { it.lastModified() }
+            var total = files.sumOf { it.length() }
+            for (item in files) {
+                if (total <= MAX_DISK_BYTES) break
+                total -= item.length()
+                item.delete()
+            }
         }
     }
 
     private fun file(key: String) = File(dir, "$key.jpg")
+    private fun previewFile(key: String) = File(dir, "$key.preview.jpg")
+    private fun previewMemoryKey(key: String) = "$key#preview"
+
+    /** A preview rendition is currently supported only by the novel-image CDN. */
+    private fun previewUrl(raw: String): String? {
+        val uri = runCatching { URI(raw) }.getOrNull() ?: return null
+        if (!uri.host.equals("p3-novel.byteimg.com", ignoreCase = true)) return null
+        val path = uri.path ?: return null
+        if (!path.startsWith("/img/novel-pic/")) return null
+        val base = path.substringBefore("~")
+        val id = base.substringAfterLast('/').substringBefore('.')
+        if (!id.matches(Regex("[a-fA-F0-9]{32}"))) return null
+        return "https://p3-novel.byteimg.com" + base + "~tplv-shrink:${PREVIEW_EDGE}:0.jpeg"
+    }
 
     private fun candidateUrls(raw: String): List<String> {
         val source = raw.trim()
@@ -279,8 +477,7 @@ class TvArtworkLoader(context: Context) {
         val path = uri?.path.orEmpty()
         val result = LinkedHashSet<String>()
 
-        // Prefer the CDN's lightweight JPEG rendition instead of first waiting
-        // on the original full-size image, which may time out on older TV networks.
+        // Prefer a decoder-friendly JPEG rendition for older TV devices.
         if ((host.endsWith(".fqnovelpic.com") || host.endsWith(".byteimg.com")) &&
             (path.contains("/novel-pic/") || path.contains("/novel-static/"))) {
             val segment = if (path.contains("/novel-pic/")) "/novel-pic/" else "/novel-static/"
@@ -298,9 +495,8 @@ class TvArtworkLoader(context: Context) {
             }
         }
 
-        // Always retain the server URL as a fallback for sources with no JPEG variant.
+        // Keep the server URL as a fallback for sources without a JPEG variant.
         result.add(first)
-        // A few older sources genuinely only serve HTTP. Try that last, after HTTPS.
         if (source.startsWith("http://", true)) result.add(source)
         return result.filter {
             it.startsWith("https://", true) || it.startsWith("http://", true)
@@ -308,7 +504,7 @@ class TvArtworkLoader(context: Context) {
     }
 
     private fun key(raw: String): String {
-        // Keep query parameters in the key: some CDNs use them to select a rendition or signature.
+        // Keep query parameters: some CDNs use them to select a rendition or signature.
         val stable = runCatching {
             val uri = URI(raw)
             URI(uri.scheme, uri.authority, uri.path, uri.query, null).toASCIIString()
