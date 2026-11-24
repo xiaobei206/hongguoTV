@@ -14,6 +14,11 @@ import android.widget.TextView
 import androidx.recyclerview.widget.DiffUtil
 import androidx.recyclerview.widget.RecyclerView
 import com.xiaobei206.hongguotv.model.Card
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import dev.openhongguo.Episode
 
 class TvCardAdapter(
@@ -23,21 +28,37 @@ class TvCardAdapter(
     private val onLongClick: (Card) -> Unit,
 ) : RecyclerView.Adapter<TvCardAdapter.Holder>() {
     private var items: List<Card> = emptyList()
+    private val submitScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private var submitGeneration = 0
 
-    fun submit(next: List<Card>) {
-        if (items == next) return
+    /**
+     * Calculate list diffs away from the UI thread. The generation token prevents a slower
+     * older diff from replacing a newer feed result when pages arrive quickly.
+     */
+    fun submit(next: List<Card>, onApplied: (() -> Unit)? = null) {
+        val generation = ++submitGeneration
+        if (items == next) {
+            onApplied?.invoke()
+            return
+        }
         val old = items
         val updated = next.toList()
-        val diff = DiffUtil.calculateDiff(object : DiffUtil.Callback() {
-            override fun getOldListSize() = old.size
-            override fun getNewListSize() = updated.size
-            override fun areItemsTheSame(oldPosition: Int, newPosition: Int) =
-                old[oldPosition].id == updated[newPosition].id
-            override fun areContentsTheSame(oldPosition: Int, newPosition: Int) =
-                old[oldPosition] == updated[newPosition]
-        }, false)
-        items = updated
-        diff.dispatchUpdatesTo(this)
+        submitScope.launch {
+            val diff = withContext(Dispatchers.Default) {
+                DiffUtil.calculateDiff(object : DiffUtil.Callback() {
+                    override fun getOldListSize() = old.size
+                    override fun getNewListSize() = updated.size
+                    override fun areItemsTheSame(oldPosition: Int, newPosition: Int) =
+                        old[oldPosition].id == updated[newPosition].id
+                    override fun areContentsTheSame(oldPosition: Int, newPosition: Int) =
+                        old[oldPosition] == updated[newPosition]
+                }, false)
+            }
+            if (generation != submitGeneration || items !== old) return@launch
+            items = updated
+            diff.dispatchUpdatesTo(this@TvCardAdapter)
+            onApplied?.invoke()
+        }
     }
 
     override fun getItemCount() = items.size

@@ -36,7 +36,7 @@ import kotlin.math.roundToInt
  * TV poster pipeline with bounded memory/disk caches and separate preview/full-image lanes.
  *
  * - 96 MiB bitmap LRU and 256 MiB disk LRU.
- * - Four low-priority preview workers plus two full-image workers (six total).
+ * - Six full-image workers plus a separate two-request preview lane.
  * - Same-URL downloads are shared; recycled ImageViews cannot receive stale results.
  * - Nearby cards are prefetched, but only one background prefetch may occupy a full-image lane.
  * - ByteDance novel posters show a small preview first, then replace it with the full image.
@@ -54,10 +54,13 @@ class TvArtworkLoader(context: Context) {
     private val appContext = context.applicationContext
     private val dir = File(appContext.cacheDir, "tv-covers").apply { mkdirs() }
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
-    private val previewDispatcher = Dispatchers.IO.limitedParallelism(4)
-    private val imageDispatcher = Dispatchers.IO.limitedParallelism(2)
+    private val previewDispatcher = Dispatchers.IO.limitedParallelism(2)
+    // Match the six-way full-image pipeline used by 开心果; previews use a separate small lane.
+    private val imageDispatcher = Dispatchers.IO.limitedParallelism(6)
     private val requestLock = Any()
     private val diskLock = Any()
+    /** Maintained under diskLock so normal writes do not rescan the entire cache directory. */
+    private var diskBytesEstimate: Long? = null
     private val inFlight = HashMap<String, Deferred<Bitmap?>>()
     private val previewInFlight = HashMap<String, Deferred<Bitmap?>>()
     private val preloading = LinkedHashSet<String>()
@@ -290,7 +293,6 @@ class TvArtworkLoader(context: Context) {
             val bitmap = decode(bytes, runCatching { URL(candidate).host }.getOrDefault("unknown")) ?: continue
             memory.put(k, bitmap)
             save(bitmap, cached, 84)
-            trim()
             return bitmap
         }
         return null
@@ -320,7 +322,6 @@ class TvArtworkLoader(context: Context) {
         val bitmap = decode(bytes, "preview", PREVIEW_EDGE) ?: return null
         memory.put(memoryKey, bitmap)
         save(bitmap, cached, 76)
-        trim()
         return bitmap
     }
 
@@ -413,20 +414,42 @@ class TvArtworkLoader(context: Context) {
 
     private fun save(bitmap: Bitmap, target: File, quality: Int) {
         val temp = File(target.parentFile, target.name + ".tmp")
-        runCatching {
-            synchronized(diskLock) {
-                FileOutputStream(temp).use { bitmap.compress(Bitmap.CompressFormat.JPEG, quality, it) }
-                if (!temp.renameTo(target)) {
+        try {
+            // JPEG encoding can be CPU-heavy. Do not hold the global cache lock while encoding;
+            // otherwise every other image's disk read waits behind this one file.
+            val compressed = FileOutputStream(temp).use {
+                bitmap.compress(Bitmap.CompressFormat.JPEG, quality, it)
+            }
+            if (!compressed) {
+                temp.delete()
+                Log.w(TAG, "poster cache compression returned false")
+                return
+            }
+
+            val saved = synchronized(diskLock) {
+                val beforeTotal = diskBytesEstimate ?: (dir.listFiles()
+                    ?.filter { it.isFile && !it.name.endsWith(".tmp") }
+                    ?.sumOf { it.length() } ?: 0L)
+                val oldLength = if (target.isFile) target.length() else 0L
+                var moved = temp.renameTo(target)
+                if (!moved) {
                     target.delete()
-                    if (!temp.renameTo(target)) {
-                        temp.delete()
-                        Log.w(TAG, "poster cache replace failed")
-                    }
+                    moved = temp.renameTo(target)
+                }
+                if (moved) {
+                    diskBytesEstimate = (beforeTotal - oldLength + target.length()).coerceAtLeast(0L)
+                    true
+                } else {
+                    diskBytesEstimate = (beforeTotal - oldLength).coerceAtLeast(0L)
+                    temp.delete()
+                    Log.w(TAG, "poster cache replace failed")
+                    false
                 }
             }
-        }.onFailure {
+            if (saved) trim()
+        } catch (e: Exception) {
             synchronized(diskLock) { temp.delete() }
-            Log.w(TAG, "poster cache write failed", it)
+            Log.w(TAG, "poster cache write failed", e)
         }
     }
 
@@ -438,15 +461,22 @@ class TvArtworkLoader(context: Context) {
 
     private fun trim() {
         synchronized(diskLock) {
-            val all = dir.listFiles()?.filter { it.isFile } ?: return
-            all.filter { it.name.endsWith(".tmp") }.forEach { it.delete() }
-            val files = all.filterNot { it.name.endsWith(".tmp") }.sortedBy { it.lastModified() }
+            val estimated = diskBytesEstimate ?: (dir.listFiles()
+                ?.filter { it.isFile && !it.name.endsWith(".tmp") }
+                ?.sumOf { it.length() } ?: return)
+            diskBytesEstimate = estimated
+            // Most writes are well under the cap. Avoid a full directory scan/sort for each poster.
+            if (estimated <= MAX_DISK_BYTES) return
+
+            val files = dir.listFiles()?.filter { it.isFile && !it.name.endsWith(".tmp") }
+                ?.sortedBy { it.lastModified() } ?: return
             var total = files.sumOf { it.length() }
             for (item in files) {
                 if (total <= MAX_DISK_BYTES) break
                 total -= item.length()
                 item.delete()
             }
+            diskBytesEstimate = total.coerceAtLeast(0L)
         }
     }
 

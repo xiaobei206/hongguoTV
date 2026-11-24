@@ -453,12 +453,13 @@ class MainActivity : ComponentActivity() {
 
     private fun renderFeed(snapshot: UiSnapshot) {
         renderFeedFilters(snapshot)
-        cardAdapter.submit(snapshot.cards)
-        recycler.post {
-            val manager = recycler.layoutManager as? GridLayoutManager ?: return@post
-            val lastVisible = manager.findLastVisibleItemPosition()
-            val start = if (lastVisible >= 0) lastVisible + 1 else 0
-            cardAdapter.preloadRange(start, manager.spanCount * 3)
+        cardAdapter.submit(snapshot.cards) {
+            recycler.post {
+                val manager = recycler.layoutManager as? GridLayoutManager ?: return@post
+                val lastVisible = manager.findLastVisibleItemPosition()
+                val start = if (lastVisible >= 0) lastVisible + 1 else 0
+                cardAdapter.preloadRange(start, manager.spanCount * 3)
+            }
         }
         val hasCards = snapshot.cards.isNotEmpty()
         emptyState.visibility = if (hasCards) View.GONE else View.VISIBLE
