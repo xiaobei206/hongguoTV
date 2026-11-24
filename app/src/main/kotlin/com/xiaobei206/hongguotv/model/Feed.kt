@@ -46,7 +46,7 @@ class Feed(
     /** Sorts the cards after each page, when set. */
     internal var order: ((List<Card>) -> List<Card>)? = null
 
-    internal fun add(p: FeedPage, requestCursor: String = cursor): Int {
+    internal fun add(p: FeedPage): Int {
         var incoming = p.cards
         if (stale) {
             incoming = incoming + cards
@@ -63,14 +63,7 @@ class Feed(
             }
         }
         cursor = p.cursor
-        val cursorAdvanced = p.cursor.isNotBlank() && p.cursor != requestCursor
-        more = p.more && cursorAdvanced
-        if (p.more && !cursorAdvanced) {
-            debugLog {
-                "feed pagination stopped: cursor did not advance requestLength=${requestCursor.length} " +
-                    "responseLength=${p.cursor.length} pageCards=${p.cards.size} added=$added"
-            }
-        }
+        more = p.more
         order?.let { list = ArrayList(it(list)) }
         if (added == 0 && p.cards.isNotEmpty()) more = false
         cards = list
@@ -103,14 +96,8 @@ class Feed(
     /** Whether the grid should ask for the next page. */
     val wantsMore: Boolean get() = fetch != null && (stale || more || !started)
 
-    /**
-     * Loads exactly one upstream page. The caller decides whether another page
-     * should be requested, so the first useful response can reach the UI at once.
-     * The parameter overload remains source-compatible with older callers.
-     */
+    /** Fetches the next page, unless one is on its way, the feed has no more, or the last try failed a moment ago. */
     fun loadMore() = loadPage()
-
-    fun loadMore(@Suppress("UNUSED_PARAMETER") minAdditionalCards: Int) = loadPage()
 
     private fun loadPage() {
         val fetch = fetch ?: return
@@ -122,7 +109,7 @@ class Feed(
         scope.launch {
             try {
                 val page = fetch(requested)
-                val added = add(page, requestCursor = requested)
+                val added = add(page)
                 error = null
                 tries = 0
                 onPage?.invoke(page)
@@ -193,7 +180,7 @@ class Feed(
             }
             error = null
             tries = 0
-            add(p, requestCursor = "")
+            add(p)
             if (merging && had) {
                 // The grid goes on from where it had got to, not from the
                 // fresh page's second.

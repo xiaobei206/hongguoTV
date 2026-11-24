@@ -25,12 +25,12 @@ class FeedPaginationTest {
         }
 
         try {
-            feed.loadMore(100)
+            feed.loadMore()
             assertEquals(listOf(""), requested)
             assertEquals(5, feed.cards.size)
             assertFalse(feed.loading)
 
-            feed.loadMore(100)
+            feed.loadMore()
             assertEquals(listOf("", "cursor-1"), requested)
             assertEquals(10, feed.cards.size)
         } finally {
@@ -85,7 +85,7 @@ class FeedPaginationTest {
         }
 
         try {
-            repeat(7) { feed.loadMore(100) }
+            repeat(7) { feed.loadMore() }
             assertEquals(7, requested.size)
             assertEquals("found", feed.cards.single().id)
             assertTrue(feed.wantsMore)
@@ -109,7 +109,7 @@ class FeedPaginationTest {
         }
 
         try {
-            repeat(3) { feed.loadMore(3) }
+            repeat(3) { feed.loadMore() }
             assertEquals(listOf("", "cursor-1", "cursor-2"), requested)
             assertEquals(listOf("card-1", "card-2", "card-3"), feed.cards.map { it.id })
             assertTrue(feed.wantsMore)
@@ -119,19 +119,24 @@ class FeedPaginationTest {
     }
 
     @Test
-    fun stopsWhenServerClaimsMoreButDoesNotAdvanceCursor() {
+    fun respectsServerHasMoreWhenCursorRepeatsButEachPageAddsCards() {
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
         var requests = 0
         val feed = Feed(scope) { _ ->
             requests++
-            FeedPage(listOf(Card("a", "作品 A")), cursor = "", more = true)
+            FeedPage(listOf(Card("card-$requests", "作品 $requests")), cursor = "same", more = true)
         }
 
         try {
             feed.loadMore()
             assertEquals(1, requests)
-            assertEquals(listOf("a"), feed.cards.map { it.id })
-            assertFalse(feed.wantsMore)
+            assertEquals(listOf("card-1"), feed.cards.map { it.id })
+            assertTrue(feed.wantsMore)
+
+            feed.loadMore()
+            assertEquals(2, requests)
+            assertEquals(listOf("card-1", "card-2"), feed.cards.map { it.id })
+            assertTrue(feed.wantsMore)
         } finally {
             scope.cancel()
         }
