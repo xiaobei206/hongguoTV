@@ -25,11 +25,32 @@ TV 端与「开心果」手机/平板端独立发布，复用 openhongguo Kotlin
 
 ## 构建
 
-需要 JDK 17 和 Android SDK 36。运行以下命令执行单元测试并构建 Debug APK：
+正式 CI 使用固定版本的 Go SDK 源码构建 Android AAR，而不是直接使用 Maven 上的旧 SDK 包：
 
-    ./gradlew testDebugUnitTest assembleDebug
+- openhongguo：`1e9334185a46033bcc4e3e30fc41f649958b1389`
+- 开心果共享 SDK 补丁：`7acbf7c5f12723431702c1005bcd110470ee3976`
+- 工具链：Go 1.26、JDK 17、Android SDK 36、NDK 28.2.13676358，以及固定版本的 gomobile（见 Android CI 工作流）。
 
-正式 Release 由 GitHub Actions 构建、签名校验并生成 APK 与 SHA-256 文件。仓库中用于自动化发布的签名材料是公开的，**不能用于安全敏感应用**；相同签名可被任何人使用，因此它不能单独证明 APK 来源。请勿将该密钥复用于其他项目。
+本地构建还需要 Python 3、Git，并先按 CI 的固定版本生成 AAR。以下命令在已配置好 Android SDK / NDK 的 Bash 环境中执行：
+
+    mkdir -p .build
+    git clone https://github.com/xiaobei206/openhongguo .build/openhongguo
+    git -C .build/openhongguo checkout 1e9334185a46033bcc4e3e30fc41f649958b1389
+    git clone https://github.com/xiaobei206/kaixinguo-android .build/kaixinguo
+    git -C .build/kaixinguo checkout 7acbf7c5f12723431702c1005bcd110470ee3976
+    python3 .build/kaixinguo/scripts/patch-openhongguo.py .build/openhongguo
+    cd .build/openhongguo
+    go test ./...
+    cd bindings/mobile/core && go test ./... && cd ../../..
+    go install golang.org/x/mobile/cmd/gomobile@v0.0.0-20261011034528-197770444867
+    gomobile init
+    cd bindings/mobile && chmod +x build.sh && ./build.sh android
+    cd ../../../../
+    ./gradlew testDebugUnitTest assembleDebug -PpatchedOpenhongguoAar="$PWD/.build/openhongguo/bindings/mobile/android/build/outputs/aar/openhongguo-release.aar"
+
+Android Studio 在未传入 AAR 时仍可使用 Maven 依赖完成 IDE 同步；但该依赖只是旧版本的 classpath 兜底。**APK / AAB 打包会强制要求上面固定版本的 AAR**，避免本地构建意外带入没有当前修复的 SDK。正式 Release 由 GitHub Actions 自动构建、签名校验并生成 APK 与 SHA-256 文件。
+
+仓库中用于自动化发布的签名材料是公开的，**不能用于安全敏感应用**；相同签名可被任何人使用，因此它不能单独证明 APK 来源。请勿将该密钥复用于其他项目。
 
 ## 文档与反馈
 
