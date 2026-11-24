@@ -38,6 +38,8 @@ TV 端与「开心果」手机/平板端独立发布，复用 openhongguo Kotlin
     git -C .build/openhongguo checkout 1e9334185a46033bcc4e3e30fc41f649958b1389
     git clone https://github.com/xiaobei206/kaixinguo-android .build/kaixinguo
     git -C .build/kaixinguo checkout dc8c63b492228e5a7ab83c53fed4e1521a3cc76d
+    export PATH="$(go env GOPATH)/bin:$PATH"
+    export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/28.2.13676358"
     python3 .build/kaixinguo/scripts/patch-openhongguo.py .build/openhongguo
     cd .build/openhongguo
     go test ./...
